@@ -12,7 +12,7 @@ T_COMPLETION = t.Dict[str, t.Union[str, int, float]]
 class LLM(ABC):
     @abstractmethod
     def __init__(self, model: str):
-        pass
+        self.model = model
 
     @abstractmethod
     def generate(self, conversation: T_CONVERSATION) -> T_COMPLETION:
@@ -62,4 +62,4 @@ def get_llm(model: str) -> LLM:
 def load_prompt(name: str) -> str:
     with open(Path(__file__).parent / 'prompts' / f"{name}.md", 'r', encoding='utf-8') as f:
         content = f.read()
-    return content
+    return content.strip()
