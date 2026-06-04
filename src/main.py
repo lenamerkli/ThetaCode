@@ -1,9 +1,9 @@
-from src.docker import Docker
+from docker import Docker
 from requests import request
-from src.venv_finder import scan_for_venvs, VenvInfo
+from venv_finder import scan_for_venvs, VenvInfo
 from time import sleep
 from pathlib import Path
-from src.llm import T_CONVERSATION, load_prompt, LLM
+from llm import T_CONVERSATION, load_prompt, LLM
 
 
 class Project:
@@ -52,6 +52,9 @@ class ThetaCode:
             for venv in venvs:
                 self._recreate_venv(venv)
 
+    def _headers(self) -> dict:
+        return {'Authorization': f'Bearer {self._docker.access_token}'}
+
     def execute_in_docker(self, command: str, cwd: str = '/home/agent/', venv: str = '', timeout: int = 60):
         payload = {
             'command': command,
@@ -59,23 +62,23 @@ class ThetaCode:
             'venv': venv,
             'timeout': timeout
         }
-        resp = request('post', f"http://localhost:{self._port}/execute", json=payload)
+        resp = request('post', f"http://localhost:{self._port}/execute", json=payload, headers=self._headers())
         return resp.json()
 
     def read_file(self, path: str) -> dict:
-        resp = request('post', f"http://localhost:{self._port}/read_file", json={'path': path})
+        resp = request('post', f"http://localhost:{self._port}/read_file", json={'path': path}, headers=self._headers())
         return resp.json()
 
     def write_to_file(self, path: str, content: str) -> dict:
-        resp = request('post', f"http://localhost:{self._port}/write_to_file", json={'path': path, 'content': content})
+        resp = request('post', f"http://localhost:{self._port}/write_to_file", json={'path': path, 'content': content}, headers=self._headers())
         return resp.json()
 
     def replace_in_file(self, path: str, search: str, replace: str) -> dict:
-        resp = request('post', f"http://localhost:{self._port}/replace_in_file", json={'path': path, 'search': search, 'replace': replace})
+        resp = request('post', f"http://localhost:{self._port}/replace_in_file", json={'path': path, 'search': search, 'replace': replace}, headers=self._headers())
         return resp.json()
 
     def health_check(self):
-        resp = request('get', f"http://localhost:{self._port}/")
+        resp = request('get', f"http://localhost:{self._port}/", headers=self._headers())
         return resp.status_code == 200
 
     def _get_venvs(self):

@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# Allow Python version to be overridden via environment variable
+PYTHON_VERSION="/usr/bin/python3"
+PYTHON_SCRIPT="/opt/viewwebsite.py"
+
+# Shift to remove script name from arguments
+shift
+
+# Execute
+"$PYTHON_VERSION" "$PYTHON_SCRIPT" "$@"

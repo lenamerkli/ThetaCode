@@ -4,8 +4,8 @@ import secrets
 import typing as t
 
 
-IMAGE_NAME = 'ThetaCodeDebian13'
-CONTAINER_NAME = 'ThetaCode'
+IMAGE_NAME = 'thetacode_debian_13'
+CONTAINER_NAME = 'thetacode'
 INTERNAL_PORT = 50000
 
 

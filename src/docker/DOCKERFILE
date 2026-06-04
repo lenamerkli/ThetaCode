@@ -1,7 +1,13 @@
 FROM debian:trixie-slim
-RUN apt-get update && apt-get upgrade -y && apt-get install -y vim curl wget git python3 python3-pip && apt-get clean && rm -rf /var/lib/apt/lists/*
-RUN pip3 install --no-cache-dir flask
+RUN apt-get update && apt-get upgrade -y && apt-get install -y vim curl wget git python3 python3-pip libxml2-dev libxslt-dev libjpeg62-turbo-dev && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN pip3 install --break-system-packages --no-cache-dir flask requests beautifulsoup4 curl-cffi crawl4ai
+RUN pip3 install --break-system-packages --no-cache-dir playwright && python3 -m playwright install chromium
 RUN mkdir -p /home/agent/tools /home/agent/examples
+RUN mkdir -p /home/agent/tmp
 WORKDIR /opt
 COPY app.py /opt/app.py
+COPY opt /opt
+COPY software /home/agent/software
+RUN find /home/agent/software -type f -exec chmod +x {} +
+COPY examples /home/agent/examples
 CMD ["python3", "app.py"]
