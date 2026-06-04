@@ -1,9 +1,14 @@
+import asyncio
+import concurrent.futures
+from pathlib import Path
+import shutil
+
 from docker import Docker
 from requests import request
 from venv_finder import scan_for_venvs, VenvInfo
 from time import sleep
-from pathlib import Path
-from llm import T_CONVERSATION, load_prompt, LLM
+from llm import T_CONVERSATION, load_prompt, LLM, get_llm
+from persistence import Database
 
 
 class Project:
@@ -13,39 +18,44 @@ class Project:
 
     @classmethod
     def create(cls, name: str, original_path: str):
-        path = f"~/.local/share/ThetaCode/projects/{name}/files"
-        Path(original_path).copy(path)
-        return cls(name, path)
+        dest = Path.home() / '.local/share/ThetaCode/projects' / name / 'files'
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if Path(original_path).is_dir():
+            shutil.copytree(original_path, dest, dirs_exist_ok=True)
+        else:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(original_path, dest)
+        return cls(name, str(dest))
 
 
 class ThetaCode:
     def __init__(self, port: int = 50000):
         self._docker = Docker()
-        self._project = None
+        self.project = None
         self._port = port
 
     def _recreate_venv(self, venv: VenvInfo):
-        project_path = Path(self._project.path)
+        project_path = Path(self.project.path)
         venv_path = venv.path
         try:
             relative_path = venv_path.relative_to(project_path)
         except ValueError:
             return
-        container_path = f"/home/agent/{self._project.name}/{relative_path.as_posix()}"
+        container_path = f"/home/agent/{self.project.name}/{relative_path.as_posix()}"
         self.execute_in_docker(f"rm -rf {container_path}")
         self.execute_in_docker(f"python3 -m venv {container_path}")
         for pkg in venv.packages:
             pkg_name = pkg.get('name')
             pkg_version = pkg.get('version')
             if pkg_name and pkg_version:
-                self.execute_in_docker(f"pip install {pkg_name}=={pkg_version}", venv=container_path, cwd=f"/home/agent/{self._project.name}")
+                self.execute_in_docker(f"pip install {pkg_name}=={pkg_version}", venv=container_path, cwd=f"/home/agent/{self.project.name}")
             elif pkg_name:
-                self.execute_in_docker(f"pip install {pkg_name}", venv=container_path, cwd=f"/home/agent/{self._project.name}")
+                self.execute_in_docker(f"pip install {pkg_name}", venv=container_path, cwd=f"/home/agent/{self.project.name}")
 
-    def _start_docker(self, recreate_venvs: bool = True):
-        if not self._project:
+    def start_docker(self, recreate_venvs: bool = True):
+        if not self.project:
             raise ValueError("Project not specified")
-        self._docker.start(port=self._port, additional_volumes=[(self._project.path, f"/home/agent/{self._project.name}")])
+        self._docker.start(port=self._port, additional_volumes=[(self.project.path, f"/home/agent/{self.project.name}")])
         sleep(1)
         if recreate_venvs:
             venvs = self._get_venvs()
@@ -82,33 +92,160 @@ class ThetaCode:
         return resp.status_code == 200
 
     def _get_venvs(self):
-        return scan_for_venvs(self._project.path)
+        return scan_for_venvs(self.project.path)
 
-    def _stop_docker(self):
+    def stop_docker(self):
         self._docker.stop()
 
 
 class Chat:
-    def __init__(self, project: Project, theta_code: ThetaCode):
+    def __init__(self, project: Project, theta_code: ThetaCode, db: Database, chat_id: int | None = None):
         self._project = project
         self._theta_code = theta_code
-        self._conversation = []
+        self._conversation: list[dict] = []
         self._cost = 0.0
+        self._db = db
+        self._chat_id = chat_id
+        self._llm_model = ""
+
+    def load_history(self):
+        """Load messages from DB into the conversation."""
+        if self._chat_id is None:
+            return
+        msgs = self._db.get_messages(self._chat_id)
+        self._conversation = []
+        for msg in msgs:
+            entry = {
+                'role': msg['role'],
+                'content': msg['content'],
+                'thinking': msg.get('thinking') or '',
+                'cost': msg.get('cost') or 0.0,
+                'llm': msg.get('llm_model') or '',
+            }
+            self._conversation.append(entry)
+            self._cost += entry.get('cost', 0.0)
+        if not self._conversation or self._conversation[0].get('role') != 'system':
+            self._conversation.insert(0, {'role': 'system', 'content': ''})
 
     def get_cost(self) -> float:
         return self._cost
 
     def _set_system_message(self, llm: LLM):
-        # llm will later be used to disable features that are not supported by the selected LLM; to be implemented
         self._conversation[0] = {'role': 'system', 'content': load_prompt('system_default').replace('%%project_name%%', self._project.name)}
 
     def send_message(self, message: str, llm: LLM):
+        """Start the conversation with a user message. Call run_async() to step through."""
         self._set_system_message(llm)
+        self._llm_model = llm.model
         self._conversation.append({'role': 'user', 'content': f"<user_message>\n{message}\n</user_message>"})
+        if self._chat_id is not None:
+            self._db.save_message(self._chat_id, 'user', message, '', 0.0, llm.model)
+
+    def step_generator(self, llm: LLM):
+        """Synchronous generator that yields events. Runs in a thread."""
+        while True:
+            if self._conversation[-1]['role'] == 'user':
+                response = llm.generate(self._conversation)
+                self._cost += response['cost']
+                entry = {
+                    'role': 'assistant',
+                    'content': response['text'],
+                    'thinking': response.get('thinking', ''),
+                    'cost': response['cost'],
+                    'llm': llm.model,
+                }
+                self._conversation.append(entry)
+                if self._chat_id is not None:
+                    self._db.save_message(
+                        self._chat_id, entry['role'], entry['content'],
+                        entry['thinking'], entry['cost'], entry['llm']
+                    )
+                yield {"type": "assistant", "content": response['text'], "thinking": response.get('thinking', ''), "cost": response['cost']}
+            else:
+                content = self._conversation[-1]['content']
+                if ('<tool_call>' in content) and ('</tool_call>' in content):
+                    options = content.split('<tool_call>', 1)[-1].split('</tool_call>', 1)[0].strip()
+                    if ('<tool_name>' in options) and ('</tool_name>' in options):
+                        tool_name = options.split('<tool_name>', 1)[-1].split('</tool_name>', 1)[0].strip()
+                        tool_response = ''
+                        match tool_name:
+                            case 'read_file':
+                                path = self._parse_tool_param(options, 'path')
+                                start_line_str = self._parse_tool_param(options, 'start_line', '1')
+                                end_line_str = self._parse_tool_param(options, 'end_line', '1000')
+                                start_char_str = self._parse_tool_param(options, 'start_char', '0')
+                                end_char_str = self._parse_tool_param(options, 'end_char', '100000')
+                                max_chars_str = self._parse_tool_param(options, 'max_chars', '1000000')
+                                start_line = int(start_line_str) if start_line_str else 1
+                                end_line = int(end_line_str) if end_line_str else 1000
+                                start_char = int(start_char_str) if start_char_str else 0
+                                end_char = int(end_char_str) if end_char_str else 100000
+                                max_chars = int(max_chars_str) if max_chars_str else 1000000
+                                tool_response = self._tool_read_file(path, start_line, end_line, start_char, end_char, max_chars)
+                            case 'write_to_file':
+                                path = self._parse_tool_param(options, 'path')
+                                content = self._parse_tool_param(options, 'content')
+                                tool_response = self._tool_write_to_file(path, content)
+                            case 'replace_in_file':
+                                path = self._parse_tool_param(options, 'path')
+                                search = self._parse_tool_param(options, 'search')
+                                replace = self._parse_tool_param(options, 'replace')
+                                tool_response = self._tool_replace_in_file(path, search, replace)
+                            case 'bash':
+                                command = self._parse_tool_param(options, 'command')
+                                timeout_str = self._parse_tool_param(options, 'timeout', '60')
+                                directory = self._parse_tool_param(options, 'directory', '/home/agent/')
+                                venv = self._parse_tool_param(options, 'venv')
+                                max_chars_str = self._parse_tool_param(options, 'max_chars', '100000')
+                                timeout = int(timeout_str) if timeout_str else 60
+                                max_chars = int(max_chars_str) if max_chars_str else 100000
+                                tool_response = self._tool_bash(command, timeout, directory, venv, max_chars)
+                            case 'ask_user':
+                                pass
+                            case _:
+                                tool_response = f'Unknown tool: {tool_name}'
+                        if tool_name != 'ask_user':
+                            self._conversation.append({'role': 'user', 'content': f'<tool_response>\n{tool_response}\n</tool_response>'})
+                            yield {"type": "tool_call", "tool": tool_name, "response": tool_response}
+                        else:
+                            yield {"type": "ask_user", "question": self._parse_tool_param(options, 'question')}
+                            return
+                    else:
+                        self._conversation.append({'role': 'user', 'content': load_prompt('tool_call_parsing_error')})
+                        yield {"type": "tool_error", "error": "parsing"}
+                else:
+                    yield {"type": "done"}
+                    return
+
+    async def run_async(self, llm: LLM):
+        """Async wrapper that bridges the sync generator to asyncio."""
+        loop = asyncio.get_event_loop()
+        queue = asyncio.Queue()
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = None
+        done = False
+
+        def _run_in_thread():
+            for event in self.step_generator(llm):
+                if done:
+                    break
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+
+        try:
+            future = loop.run_in_executor(executor, _run_in_thread)
+            while True:
+                event = await queue.get()
+                yield event
+                if event["type"] in ("done", "ask_user"):
+                    break
+        finally:
+            done = True
+            if future:
+                future.cancel()
+            executor.shutdown(wait=False)
 
     @staticmethod
     def _parse_tool_param(options: str, param_name: str, default_value: str = '') -> str:
-        """Extract a parameter value from the tool call XML."""
         open_tag = f'<{param_name}>'
         close_tag = f'</{param_name}>'
         if open_tag in options and close_tag in options:
@@ -117,7 +254,6 @@ class Chat:
 
     @staticmethod
     def _truncate(content: str, max_chars: int) -> str:
-        """Truncate content to max_chars client-side. Returns the original if max_chars <= 0."""
         if max_chars <= 0:
             return content
         if len(content) > max_chars:
@@ -126,8 +262,6 @@ class Chat:
 
     @staticmethod
     def _get_char_pos_for_line(content: str, line: int) -> int:
-        """Return the 0-based character index for the start of the given 1-based line number.
-        If line > number of lines, returns len(content)."""
         if line <= 1:
             return 0
         pos = 0
@@ -142,8 +276,6 @@ class Chat:
 
     @staticmethod
     def _get_char_pos_for_end_line(content: str, line: int) -> int:
-        """Return the 0-based character index for the end of the given 1-based line number (exclusive).
-        If line > number of lines, returns len(content)."""
         pos = Chat._get_char_pos_for_line(content, line)
         if pos >= len(content):
             return len(content)
@@ -151,65 +283,6 @@ class Chat:
         if idx == -1:
             return len(content)
         return idx + 1 if idx != len(content) - 1 else len(content)
-
-    def _step(self, llm: LLM):
-        if self._conversation[-1]['role'] == 'user':
-            response = llm.generate(self._conversation)
-            self._cost += response['cost']
-            self._conversation.append({'role': 'assistant', 'content': response['text'], 'thinking': response['thinking'], 'cost': response['cost'], 'llm': llm.model})
-            self._step(llm)
-        else:
-            content = self._conversation[-1]['content']
-            if ('<tool_call>' in content) and ('</tool_call>' in content):
-                options = content.split('<tool_call>', 1)[-1].split('</tool_call>', 1)[0].strip()
-                if ('<tool_name>' in content) and ('</tool_name>' in options):
-                    tool_name = options.split('<tool_name>', 1)[-1].split('</tool_name>', 1)[0].strip()
-                    tool_response = ''
-                    match tool_name:
-                        case 'read_file':
-                            path = self._parse_tool_param(options, 'path')
-                            start_line_str = self._parse_tool_param(options, 'start_line', '1')
-                            end_line_str = self._parse_tool_param(options, 'end_line', '1000')
-                            start_char_str = self._parse_tool_param(options, 'start_char', '0')
-                            end_char_str = self._parse_tool_param(options, 'end_char', '100000')
-                            max_chars_str = self._parse_tool_param(options, 'max_chars', '1000000')
-                            start_line = int(start_line_str) if start_line_str else 1
-                            end_line = int(end_line_str) if end_line_str else 1000
-                            start_char = int(start_char_str) if start_char_str else 0
-                            end_char = int(end_char_str) if end_char_str else 100000
-                            max_chars = int(max_chars_str) if max_chars_str else 1000000
-                            tool_response = self._tool_read_file(path, start_line, end_line, start_char, end_char, max_chars)
-                        case 'write_to_file':
-                            path = self._parse_tool_param(options, 'path')
-                            content = self._parse_tool_param(options, 'content')
-                            tool_response = self._tool_write_to_file(path, content)
-                        case 'replace_in_file':
-                            path = self._parse_tool_param(options, 'path')
-                            search = self._parse_tool_param(options, 'search')
-                            replace = self._parse_tool_param(options, 'replace')
-                            tool_response = self._tool_replace_in_file(path, search, replace)
-                        case 'bash':
-                            command = self._parse_tool_param(options, 'command')
-                            timeout_str = self._parse_tool_param(options, 'timeout', '60')
-                            directory = self._parse_tool_param(options, 'directory', '/home/agent/')
-                            venv = self._parse_tool_param(options, 'venv')
-                            max_chars_str = self._parse_tool_param(options, 'max_chars', '100000')
-                            timeout = int(timeout_str) if timeout_str else 60
-                            max_chars = int(max_chars_str) if max_chars_str else 100000
-                            tool_response = self._tool_bash(command, timeout, directory, venv, max_chars)
-                        case 'ask_user':
-                            pass
-                        case _:
-                            tool_response = f'Unknown tool: {tool_name}'
-                    if tool_name != 'ask_user':
-                        self._conversation.append({'role': 'user', 'content': f'<tool_response>\n{tool_response}\n</tool_response>'})
-                        self._step(llm)
-                else:
-                    self._conversation.append({'role': 'user', 'content': load_prompt('tool_call_parsing_error')})
-                    self._step(llm)
-            else:
-                self._conversation.append({'role': 'user', 'content': load_prompt('no_tool_call')})
-                self._step(llm)
 
     def _tool_read_file(self, path: str, start_line: int = 1, end_line: int = 1000, start_char: int = 0, end_char: int = 100000, max_chars: int = 1000000) -> str:
         if not path:
