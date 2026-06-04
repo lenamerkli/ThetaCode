@@ -31,6 +31,9 @@ class OpenRouterLLM(LLM):
             'model': model_name,
             'messages': conversation
         }
+        print('=' * 30 + ' Begin OpenRouter Request ' + '=' * 30)
+        print(data)
+        print('=' * 30 + ' End OpenRouter Request ' + '=' * 30)
         response = request(
             method='POST',
             url='https://openrouter.ai/api/v1/chat/completions',
@@ -44,6 +47,9 @@ class OpenRouterLLM(LLM):
         if response.status_code != 200:
             raise Exception(response.text)
         response_json = response.json()
+        print('=' * 30 + ' Begin OpenRouter Response ' + '=' * 30)
+        print(response_json)
+        print('=' * 30 + ' End OpenRouter Response ' + '=' * 30)
         message = response_json["choices"][0]["message"]
         return {
             "text": message.get("content") or "",
