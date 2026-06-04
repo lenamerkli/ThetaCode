@@ -254,3 +254,4 @@ dmypy.json
 .pyre/
 .pytype/
 cython_debug/
+flet-docs/
