@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """
-SearXNG search script for priv.au.
-
 Usage examples:
   python searxng_search.py "query"
   python searxng_search.py "query" --json -o results.json
@@ -19,7 +17,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 from curl_cffi import requests
 
-BASE_URL = "https://search.internetsucks.net/"
+BASE_URL = "https://search.ctq.ro/searxng/search"
 RESULT_SELECTOR = "article.result"
 URL_SELECTOR = "a.url_header"
 TITLE_SELECTOR = "h3 a"
@@ -85,32 +83,48 @@ def search(
     time_range: str = "",
 ) -> str:
     """Perform a search request and return the HTML response."""
-    params = {
+    data = {
         "q": query,
+        f"category_{category}": "1",
         "language": language,
-        "safesearch": safesearch,
-        "pageno": pageno,
         "time_range": time_range,
-        "categories": category,
+        "safesearch": safesearch,
+        "theme": "simple",
     }
+    if pageno > 1:
+        data["pageno"] = str(pageno)
 
     cookie_header = (
         f"categories={category}; "
-        f"language={language}; "
-        f"locale={language}; "
+        f"language=auto; "
+        f"locale=en; "
+        f"autocomplete=; "
+        f"favicon_resolver=; "
+        f"method=POST; "
         f"safesearch={safesearch}; "
         f"theme=simple; "
-        f"method=GET; "
-        f'enabled_engines="duckduckgo__general\\054qwant__general\\054yahoo__general"; '
+        f"results_on_new_tab=0; "
+        f"doi_resolver=oadoi.org; "
+        f"simple_style=auto; "
+        f"center_alignment=0; "
+        f"query_in_title=0; "
+        f"search_on_category_select=1; "
+        f"hotkeys=default; "
+        f"url_formatting=pretty; "
         f"disabled_engines=; "
+        f'enabled_engines="duckduckgo__general\\054qwant__general\\054yahoo__general\\054mojeek__general"; '
+        f"enabled_plugins=; "
         f"tokens="
     )
 
-    headers = {"Cookie": cookie_header}
+    headers = {
+        "Cookie": cookie_header,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
 
-    response = requests.get(
-        BASE_URL + "search",
-        params=params,
+    response = requests.post(
+        BASE_URL,
+        data=data,
         impersonate="chrome",
         headers=headers,
     )

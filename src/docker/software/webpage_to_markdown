@@ -2,10 +2,7 @@
 
 # Allow Python version to be overridden via environment variable
 PYTHON_VERSION="/usr/bin/python3"
-PYTHON_SCRIPT="/opt/websearch.py"
-
-# Shift to remove script name from arguments
-shift
+PYTHON_SCRIPT="/opt/webpage_to_markdown.py"
 
 # Execute
 "$PYTHON_VERSION" "$PYTHON_SCRIPT" "$@"

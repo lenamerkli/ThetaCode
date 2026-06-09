@@ -23,7 +23,7 @@ from llm import get_llm                            # noqa: E402
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-DEFAULT_MODEL = "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
+DEFAULT_MODEL = "openrouter/nex-agi/nex-n2-pro:free"
 
 # Panel widths
 SIDE_PANEL_WIDTH = 210

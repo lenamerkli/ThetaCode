@@ -1,7 +1,11 @@
 FROM debian:trixie-slim
-RUN apt-get update && apt-get upgrade -y && apt-get install -y vim curl wget git python3 python3-pip libxml2-dev libxslt-dev libjpeg62-turbo-dev && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get upgrade -y && apt-get install -y \
+    vim curl wget git python3 python3-pip libxml2-dev libxslt-dev libjpeg62-turbo-dev \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 RUN pip3 install --break-system-packages --no-cache-dir flask requests beautifulsoup4 curl-cffi crawl4ai
-RUN pip3 install --break-system-packages --no-cache-dir playwright && python3 -m playwright install chromium
+RUN pip3 install --break-system-packages --no-cache-dir playwright \
+    && python3 -m playwright install chromium \
+    && python3 -m playwright install-deps chromium
 RUN mkdir -p /home/agent/tools /home/agent/examples
 RUN mkdir -p /home/agent/tmp
 WORKDIR /opt
