@@ -293,8 +293,30 @@ async def main(page: ft.Page) -> None:
             cost_text.update()
 
     # -----------------------------------------------------------------------
-    # Send message
+    # Send message (streaming)
     # -----------------------------------------------------------------------
+
+    def _build_streaming_bubble() -> tuple[ft.Container, ft.Text]:
+        """Create an assistant bubble whose content Text can be updated
+        incrementally as tokens arrive.  Returns (container, text_control)."""
+        header = ft.Text(
+            "AI",
+            size=11,
+            weight=ft.FontWeight.BOLD,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+        )
+        body = ft.Text("", selectable=True, size=14)
+        container = ft.Container(
+            content=ft.Column(
+                controls=[header, body],
+                spacing=4,
+                tight=True,
+            ),
+            bgcolor=ft.Colors.SECONDARY_CONTAINER,
+            border_radius=8,
+            padding=ft.Padding(left=10, top=8, right=10, bottom=8),
+        )
+        return container, body
 
     def _do_send() -> None:
         text = msg_input.value.strip()
@@ -325,10 +347,51 @@ async def main(page: ft.Page) -> None:
             page.update()
             return
 
-        def _worker() -> None:
+        # Streaming bubble that will be updated in real-time.
+        stream_container, stream_body = _build_streaming_bubble()
+        stream_content: list[str] = []
+        assistant_final: dict | None = None
+
+        def on_token(content: str) -> None:
+            stream_content.append(content)
+            stream_body.value = "".join(stream_content)
+            stream_body.update()
+
+        def on_new_msg(msg: dict) -> None:
+            nonlocal assistant_final
+            role = msg.get("role", "")
+            if role == "assistant":
+                # This is the final, complete assistant message from
+                # _run_loop.  Hold onto it so we can finalize the bubble
+                # after the stream task returns.
+                assistant_final = msg
+                return
+            # Non-assistant messages (user, tool_response, etc.) are
+            # shown immediately.
+            _persist_and_show(msg)
+
+        async def _stream_worker() -> None:
+            nonlocal assistant_final
+            result = ""  # final text  (== stream_content already captured)
             try:
-                chat_obj.send_message(text, llm, on_new_message=_persist_and_show)
+                # Add the streaming bubble immediately (it starts empty).
+                messages_list.controls.append(stream_container)
+                page.update()
+
+                result = chat_obj.send_message_stream(
+                    text, llm,
+                    on_token=on_token,
+                    on_new_message=on_new_msg,
+                )
             except Exception as exc:
+                # Replace the streaming placeholder with an error bubble.
+                # If on_token populated it, show the partial output first.
+                partial = "".join(stream_content)
+                if partial:
+                    stream_body.value = partial
+                # Remove the streaming container and add error instead.
+                if stream_container in messages_list.controls:
+                    messages_list.controls.remove(stream_container)
                 _persist_and_show({
                     "role": "assistant",
                     "content": f"[Runtime error] {exc}",
@@ -339,9 +402,114 @@ async def main(page: ft.Page) -> None:
                 state["is_thinking"] = False
                 thinking_row.visible = False
                 msg_input.disabled = (state["chat"] is None)
+
+                if assistant_final is not None:
+                    # The agentic loop provided the finalised message dict.
+                    # Finalise the streaming bubble in place.
+                    final_content = assistant_final.get("content", "")
+                    thinking = assistant_final.get("thinking", "") or ""
+                    cost_val = assistant_final.get("cost", 0.0) or 0.0
+                    llm_name = assistant_final.get("llm", "") or ""
+
+                    # Replace the body with a full bubble (content + thinking + cost).
+                    col_ctrls: list[ft.Control] = [
+                        ft.Text(
+                            "AI",
+                            size=11,
+                            weight=ft.FontWeight.BOLD,
+                            color=ft.Colors.ON_SURFACE_VARIANT,
+                        ),
+                    ]
+
+                    if thinking:
+                        thinking_body = ft.Text(
+                            thinking,
+                            size=11,
+                            color=ft.Colors.ON_SURFACE_VARIANT,
+                            selectable=True,
+                        )
+                        thinking_ctrl = ft.Container(
+                            content=ft.Column(
+                                controls=[
+                                    ft.Text(
+                                        "🧠 Thinking (click to expand)",
+                                        size=11,
+                                        italic=True,
+                                        color=ft.Colors.ON_SURFACE_VARIANT,
+                                    ),
+                                    thinking_body,
+                                ],
+                                tight=True,
+                                spacing=2,
+                            ),
+                            bgcolor=ft.Colors.SURFACE_CONTAINER,
+                            border_radius=4,
+                            padding=6,
+                            visible=False,
+                            data="thinking_body",
+                        )
+
+                        def _toggle_thinking(e, tc=thinking_ctrl):
+                            tc.visible = not tc.visible
+                            tc.update()
+
+                        thinking_header = ft.GestureDetector(
+                            content=ft.Text(
+                                "🧠 Show / hide thinking",
+                                size=11,
+                                italic=True,
+                                color=ft.Colors.TERTIARY,
+                            ),
+                            on_tap=_toggle_thinking,
+                        )
+                        col_ctrls.append(thinking_header)
+                        col_ctrls.append(thinking_ctrl)
+
+                    col_ctrls.append(ft.Text(final_content, selectable=True, size=14))
+
+                    if cost_val > 0:
+                        col_ctrls.append(
+                            ft.Text(
+                                f"${cost_val:.6f}",
+                                size=10,
+                                color=ft.Colors.ON_SURFACE_VARIANT,
+                            )
+                        )
+
+                    stream_container.content = ft.Column(
+                        controls=col_ctrls,
+                        spacing=4,
+                        tight=True,
+                    )
+                    stream_container.update()
+
+                    # Persist to storage.
+                    chat_id = state["chat_id"]
+                    if chat_id:
+                        storage.append_message(
+                            chat_id=chat_id,
+                            role="assistant",
+                            content=final_content,
+                            thinking=thinking,
+                            cost=cost_val,
+                            llm_model=llm_name,
+                        )
+                else:
+                    # No assistant_final — the loop ended without producing
+                    # one (e.g., ask_user or an error).  Remove the streaming
+                    # placeholder if it's still there.
+                    if stream_container in messages_list.controls:
+                        messages_list.controls.remove(stream_container)
+
+                # Update cost counter.
+                chat_obj2: Chat | None = state["chat"]
+                if chat_obj2:
+                    cost_text.value = f"Cost: ${chat_obj2.get_cost():.4f}"
+                    cost_text.update()
+
                 page.update()
 
-        threading.Thread(target=_worker, daemon=True).start()
+        page.run_task(_stream_worker)
 
     msg_input.on_submit = lambda e: _do_send()
 

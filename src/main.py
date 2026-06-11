@@ -6,7 +6,7 @@ from time import sleep
 from docker import Docker
 from requests import request
 from venv_finder import scan_for_venvs, VenvInfo
-from llm import T_CONVERSATION, load_prompt, LLM
+from llm import T_CONVERSATION, T_STREAM_CALLBACK, load_prompt, LLM
 
 
 class Project:
@@ -209,6 +209,30 @@ class Chat:
 
         return self._run_loop(llm, on_new_message)
 
+    def send_message_stream(
+        self,
+        message: str,
+        llm: LLM,
+        on_token: T_STREAM_CALLBACK,
+        on_new_message: t.Optional[T_MSG_CALLBACK] = None,
+    ) -> str:
+        """Send a user message and drive the agentic loop with token streaming.
+
+        ``on_token(content)`` is called for each content token as it arrives
+        from the LLM. ``on_new_message`` is called for every new conversation
+        entry so callers can react immediately.
+
+        Returns either the final assistant text response or ``Chat.WAITING_FOR_USER``
+        if the AI called the ask_user tool.
+        """
+        self._set_system_message(llm)
+        user_entry = {'role': 'user', 'content': f"<user_message>\n{message}\n</user_message>"}
+        self._conversation.append(user_entry)
+        if on_new_message:
+            on_new_message(user_entry)
+
+        return self._run_loop(llm, on_new_message, on_token=on_token)
+
     # ------------------------------------------------------------------
     # Iterative agentic loop (replaces the old recursive _step)
     # ------------------------------------------------------------------
@@ -217,9 +241,14 @@ class Chat:
         self,
         llm: LLM,
         on_new_message: t.Optional[T_MSG_CALLBACK] = None,
+        on_token: t.Optional[T_STREAM_CALLBACK] = None,
     ) -> str:
         """Drive the conversation forward until a final assistant response or
-        an ask_user pause.  Returns the final assistant text or WAITING_FOR_USER."""
+        an ask_user pause.  Returns the final assistant text or WAITING_FOR_USER.
+
+        If ``on_token`` is provided, the LLM's response is streamed in real-time
+        via ``generate_stream()``.  Otherwise a single ``generate()`` call is used.
+        """
 
         MAX_ITERATIONS = 50  # safety guard against infinite loops
         iters = 0
@@ -229,8 +258,11 @@ class Chat:
             last = self._conversation[-1]
 
             if last['role'] == 'user':
-                # Ask the LLM for a response.
-                response = llm.generate(self._conversation)
+                # Ask the LLM for a response — stream if a token callback is given.
+                if on_token is not None:
+                    response = llm.generate_stream(self._conversation, on_token)
+                else:
+                    response = llm.generate(self._conversation)
                 self._cost += response['cost']
                 if 'nemotron' in llm.model.lower():
                     response['text'] = response['text'].replace('</invoke>', '</tool_call>')
