@@ -35,7 +35,7 @@ If both `end_line` and `end_char` are provided, the one further from the end wil
 ### Example
 <tool_call>
 <tool_name>read_file</tool_name>
-<path>/home/agent/examples/search_something_on_the_web.md</path>
+<path>/home/agent/examples/websearch/finding_python_requests_docs.md</path>
 <end_line>100</end_line>
 </tool_call>
 ## write_to_file

@@ -452,9 +452,9 @@ class ThetaCodeApp:
     def _populate_listbox(self, listbox: tk.Listbox, items: list, data_key: str):
         """Populate a listbox with item names, storing IDs."""
         listbox.delete(0, tk.END)
+        listbox._cached_data = {}
         for i, item in enumerate(items):
             listbox.insert(tk.END, item["name"])
-            listbox._cached_data = getattr(listbox, "_cached_data", {})
             listbox._cached_data[i] = item
 
     def _get_selected_listbox_data(self, listbox: tk.Listbox) -> dict | None:
@@ -945,8 +945,8 @@ class ThetaCodeApp:
         self._clear_messages()
         self._docker_label.configure(text="Starting Docker environment…")
         self._cost_label.configure(text="Cost: $0.0000")
-        self._delete_chat_btn.configure(state=tk.NORMAL)
         self._refresh_chats()
+        self._delete_chat_btn.configure(state=tk.NORMAL)
 
         proj_row = self.storage.get_project(self.project_id)
         if not proj_row:
