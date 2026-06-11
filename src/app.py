@@ -26,7 +26,7 @@ from llm import get_llm                            # noqa: E402
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-DEFAULT_MODEL = "openrouter/nex-agi/nex-n2-pro:free"
+DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4-flash"
 SIDE_PANEL_WIDTH = 210
 
 # Dark theme colours
@@ -558,10 +558,13 @@ class ThetaCodeApp:
         text_widget = self._messages_text
         text_widget.configure(state=tk.NORMAL)
 
-        bubble_start = text_widget.index(tk.END + "-1c")
+        role_start = text_widget.index(tk.END)
 
         text_widget.insert(tk.END, "AI\n", ("bubble_ai", "role_label"))
+        content_start = text_widget.index(tk.END)
         text_widget.insert(tk.END, "\n", ("bubble_ai", "content"))  # placeholder line
+
+        content_end = text_widget.index(tk.END + "-1c")
 
         text_widget.configure(state=tk.DISABLED)
         self._scroll_to_bottom()
@@ -569,12 +572,11 @@ class ThetaCodeApp:
         self._stream_token_counter += 1
         placeholder_id = f"_stream_{self._stream_token_counter}"
 
-        # Store the range for this streaming bubble
-        content_start = text_widget.index(f"{bubble_start}+1l")
         text_widget._stream_placeholders = getattr(text_widget, "_stream_placeholders", {})
         text_widget._stream_placeholders[placeholder_id] = {
-            "start": content_start,
-            "bubble_start": bubble_start,
+            "role_start": role_start,
+            "content_start": content_start,
+            "content_end": content_end,
             "tokens": [],
             "finalized": False,
         }
@@ -592,12 +594,11 @@ class ThetaCodeApp:
         info["tokens"].append(token)
 
         text_widget.configure(state=tk.NORMAL)
-        # Delete old content line and re-insert full text
-        content_start = info["start"]
-        content_end = f"{content_start} lineend"
-        text_widget.delete(content_start, content_end)
+        # Delete old content and re-insert full text
+        text_widget.delete(info["content_start"], info["content_end"])
         full_text = "".join(info["tokens"])
-        text_widget.insert(content_start, f"{full_text}\n", ("bubble_ai", "content"))
+        text_widget.insert(info["content_start"], f"{full_text}\n", ("bubble_ai", "content"))
+        info["content_end"] = text_widget.index(tk.END + "-1c")
         text_widget.configure(state=tk.DISABLED)
         self._scroll_to_bottom()
 
@@ -614,20 +615,16 @@ class ThetaCodeApp:
 
         text_widget.configure(state=tk.NORMAL)
 
-        bubble_start = info["start"].split(".")[0] + ".0"  # start of the role line
-        # Find end: scan forward for next content
-        # Simpler: just delete from bubble_start to end, then re-add
-        # Actually, better: we just replace the content line
-        content_start = info["start"]
-        content_end = f"{content_start} lineend+1l"
+        # Delete the content area (keep the role label intact)
+        text_widget.delete(info["content_start"], info["content_end"])
 
-        # Delete the streaming line
-        text_widget.delete(content_start, content_end)
+        mark = f"_finalize_mark_{placeholder_id}"
+        text_widget.mark_set(mark, info["content_start"])
 
         if error_msg:
-            text_widget.insert(content_start, f"[Runtime error] {error_msg}\n",
+            text_widget.insert(mark, f"[Runtime error] {error_msg}\n",
                               ("bubble_ai", "error_text"))
-            text_widget.insert(content_start + "+1l", "\n")
+            text_widget.insert(mark, "\n", ("bubble_ai", "content"))
             self._cost_label.configure(text="Cost: $0.0000")
         elif final_msg:
             final_content = final_msg.get("content", "")
@@ -646,12 +643,12 @@ class ThetaCodeApp:
                 text_widget.tag_configure(unique_body_tag, foreground="#a0a0a0",
                                           font=("TkDefaultFont", 10))
 
-                text_widget.insert(content_start, "🧠 Show / hide thinking\n",
+                text_widget.insert(mark, "🧠 Show / hide thinking\n",
                                   ("bubble_ai", unique_header_tag))
-                thinking_hidden_start = text_widget.index(content_start + "+1l")
-                text_widget.insert(thinking_hidden_start, f"{thinking}\n",
+                thinking_hidden_start = text_widget.index(mark)
+                text_widget.insert(mark, f"{thinking}\n",
                                    ("bubble_ai", unique_body_tag))
-                thinking_hidden_end = text_widget.index(thinking_hidden_start + "+1l")
+                thinking_hidden_end = text_widget.index(mark)
 
                 # Save the thinking text so we can restore it after hide
                 saved_thinking = text_widget.get(thinking_hidden_start, thinking_hidden_end)
@@ -669,14 +666,12 @@ class ThetaCodeApp:
                                      lambda e, bid=thinking_id: self._toggle_thinking(bid))
 
                 # Insert final content after thinking
-                next_pos = thinking_hidden_end
-                text_widget.insert(next_pos, f"{final_content}\n", ("bubble_ai", "content"))
+                text_widget.insert(mark, f"{final_content}\n", ("bubble_ai", "content"))
             else:
-                text_widget.insert(content_start, f"{final_content}\n", ("bubble_ai", "content"))
+                text_widget.insert(mark, f"{final_content}\n", ("bubble_ai", "content"))
 
             if cost_val > 0:
-                end_pos = text_widget.index(tk.END + "-1c")
-                text_widget.insert(end_pos, f"${cost_val:.6f}\n", ("bubble_ai", "cost_label"))
+                text_widget.insert(mark, f"${cost_val:.6f}\n", ("bubble_ai", "cost_label"))
 
             # Update cost display
             chat_obj = self.chat
@@ -684,7 +679,12 @@ class ThetaCodeApp:
                 self._cost_label.configure(text=f"Cost: ${chat_obj.get_cost():.4f}")
 
             # Separator
-            text_widget.insert(tk.END, "\n")
+            text_widget.insert(mark, "\n", ("bubble_ai", "content"))
+
+        try:
+            text_widget.mark_unset(mark)
+        except tk.TclError:
+            pass
 
         text_widget.configure(state=tk.DISABLED)
         self._scroll_to_bottom()
@@ -1152,23 +1152,40 @@ class ThetaCodeApp:
             self._enable_input()
             return
 
-        # Insert streaming placeholder
-        placeholder_id = self._insert_streaming_placeholder()
+        # Show and persist the user's message bubble NOW (main thread),
+        # before inserting the AI placeholder, so the display order is correct.
+        user_msg = {
+            "role": "user",
+            "content": f"<user_message>\n{text}\n</user_message>",
+        }
+        self._persist_and_show(user_msg)
+
+        # Insert streaming placeholder AFTER the user bubble is already visible.
+        self._current_stream_placeholder = self._insert_streaming_placeholder()
 
         assistant_final = [None]  # mutable container for closure
 
         def on_token(content: str):
-            self._stream_queue.put(("token", placeholder_id, content))
+            self._stream_queue.put(("token", content))
 
         def on_new_msg(msg: dict):
             role = msg.get("role", "")
             if role == "assistant":
-                assistant_final[0] = msg
+                content = msg.get("content", "")
+                # If the assistant used a tool, finalize this bubble
+                # and start a fresh placeholder for the next turn.
+                if "<tool_call>" in content and "</tool_call>" in content:
+                    self._stream_queue.put(("assistant_tool", msg))
+                else:
+                    assistant_final[0] = msg
+                return
+            # Skip the initial user message — it was already displayed and
+            # persisted above, before the streaming placeholder was inserted.
+            if msg.get("content", "").lstrip().startswith("<user_message>"):
                 return
             self._stream_queue.put(("message", msg))
 
         def _stream_worker():
-            nonlocal assistant_final
             try:
                 result = chat_obj.send_message_stream(
                     text, llm,
@@ -1176,9 +1193,9 @@ class ThetaCodeApp:
                     on_new_message=on_new_msg,
                 )
             except Exception as exc:
-                self._stream_queue.put(("error", placeholder_id, str(exc)))
+                self._stream_queue.put(("error", str(exc)))
             else:
-                self._stream_queue.put(("done", placeholder_id, assistant_final[0]))
+                self._stream_queue.put(("done", assistant_final[0]))
 
         threading.Thread(target=_stream_worker, daemon=True).start()
 
@@ -1193,42 +1210,80 @@ class ThetaCodeApp:
                 action = item[0]
 
                 if action == "token":
-                    _, placeholder_id, token = item
-                    self._append_streaming_token(placeholder_id, token)
+                    _, token = item
+                    ph = getattr(self, "_current_stream_placeholder", None)
+                    if ph is None:
+                        # Lazily create the placeholder so that any tool-result
+                        # bubbles queued before this token are drawn first.
+                        self._current_stream_placeholder = self._insert_streaming_placeholder()
+                        ph = self._current_stream_placeholder
+                    self._append_streaming_token(ph, token)
 
                 elif action == "message":
                     _, msg = item
                     self._persist_and_show(msg)
 
+                elif action == "assistant_tool":
+                    _, msg = item
+                    # Persist the tool-call assistant message so it survives a restart
+                    chat_id = self.chat_id
+                    if chat_id:
+                        self.storage.append_message(
+                            chat_id=chat_id,
+                            role="assistant",
+                            content=msg.get("content", ""),
+                            thinking=msg.get("thinking", "") or "",
+                            cost=msg.get("cost", 0.0) or 0.0,
+                            llm_model=msg.get("llm", "") or "",
+                        )
+                    ph = getattr(self, "_current_stream_placeholder", None)
+                    if ph:
+                        self._finalize_streaming_bubble(ph, msg)
+                    # Do NOT create a new placeholder here — defer it until the
+                    # first token of the next AI turn arrives so that any
+                    # tool-result bubble queued after this event is drawn first.
+                    self._current_stream_placeholder = None
+
                 elif action == "error":
-                    _, placeholder_id, error = item
-                    self._finalize_streaming_bubble(placeholder_id, None, error_msg=error)
+                    _, error = item
+                    ph = getattr(self, "_current_stream_placeholder", None)
+                    if ph:
+                        self._finalize_streaming_bubble(ph, None, error_msg=error)
                     self.is_thinking = False
                     self._hide_thinking_indicator()
                     self._enable_input()
 
                 elif action == "done":
-                    _, placeholder_id, final_msg = item
-                    if final_msg is not None:
-                        self._finalize_streaming_bubble(placeholder_id, final_msg)
-                        # Persist to storage
-                        chat_id = self.chat_id
-                        if chat_id:
-                            final_content = final_msg.get("content", "")
-                            thinking = final_msg.get("thinking", "") or ""
-                            cost_val = final_msg.get("cost", 0.0) or 0.0
-                            llm_name = final_msg.get("llm", "") or ""
-                            self.storage.append_message(
-                                chat_id=chat_id,
-                                role="assistant",
-                                content=final_content,
-                                thinking=thinking,
-                                cost=cost_val,
-                                llm_model=llm_name,
-                            )
-                    else:
-                        # No final message — remove streaming placeholder
-                        pass
+                    _, final_msg = item
+                    ph = getattr(self, "_current_stream_placeholder", None)
+                    if ph is None and final_msg is not None:
+                        # Edge case: the LLM returned a final answer without
+                        # streaming any tokens (so no placeholder was created
+                        # lazily).  Create one now so the message is displayed.
+                        ph = self._insert_streaming_placeholder()
+                        self._current_stream_placeholder = ph
+                    if ph:
+                        if final_msg is not None:
+                            self._finalize_streaming_bubble(ph, final_msg)
+                            # Persist to storage
+                            chat_id = self.chat_id
+                            if chat_id:
+                                final_content = final_msg.get("content", "")
+                                thinking = final_msg.get("thinking", "") or ""
+                                cost_val = final_msg.get("cost", 0.0) or 0.0
+                                llm_name = final_msg.get("llm", "") or ""
+                                self.storage.append_message(
+                                    chat_id=chat_id,
+                                    role="assistant",
+                                    content=final_content,
+                                    thinking=thinking,
+                                    cost=cost_val,
+                                    llm_model=llm_name,
+                                )
+                        else:
+                            # No final message — just finalize the placeholder empty
+                            self._finalize_streaming_bubble(ph, None)
+                    self._current_stream_placeholder = None
 
                     # Update cost
                     chat_obj = self.chat

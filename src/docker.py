@@ -54,6 +54,9 @@ class Docker:
                 host_path = os.path.abspath(host_path)
                 cmd.extend(['-v', f'{host_path}:{container_path}'])
         cmd.append(self.image_name)
+        print(f"==== Docker Command Begin ====")
+        print(cmd)
+        print(f"==== Docker Command End ====")
         subprocess.run(cmd, check=True)
 
     def _stop_existing_container(self):
