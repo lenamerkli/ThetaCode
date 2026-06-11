@@ -1,3 +1,4 @@
+import threading
 from abc import ABC, abstractmethod
 from requests import request
 from os import environ
@@ -25,8 +26,13 @@ class LLM(ABC):
         self,
         conversation: T_CONVERSATION,
         on_token: T_STREAM_CALLBACK,
+        cancel_event: t.Optional[threading.Event] = None,
     ) -> T_COMPLETION:
-        """Stream tokens via on_token(content), return the final T_COMPLETION dict."""
+        """Stream tokens via on_token(content), return the final T_COMPLETION dict.
+        
+        If ``cancel_event`` is set, the stream is aborted early and a partial
+        T_COMPLETION is returned with whatever was accumulated so far.
+        """
         pass
 
 
@@ -72,8 +78,17 @@ class OpenRouterLLM(LLM):
         self,
         conversation: T_CONVERSATION,
         on_token: T_STREAM_CALLBACK,
+        cancel_event: t.Optional[threading.Event] = None,
     ) -> T_COMPLETION:
-        """Stream tokens via on_token(content) and return the final T_COMPLETION."""
+        """Stream tokens via on_token(content) and return the final T_COMPLETION.
+        
+        If ``cancel_event`` is set, the stream is aborted early and a partial
+        T_COMPLETION is returned with whatever was accumulated so far.
+        """
+        # Check cancellation before even starting the request
+        if cancel_event and cancel_event.is_set():
+            return {"text": "", "cost": 0.0, "thinking": ""}
+
         model_name = self.model.replace('OpenRouter', '').replace('openrouter', '')
         if model_name[0] == '/':
             model_name = model_name[1:]
@@ -108,6 +123,11 @@ class OpenRouterLLM(LLM):
 
         try:
             for line in response.iter_lines(decode_unicode=True):
+                # Check for cancellation on each line
+                if cancel_event and cancel_event.is_set():
+                    print("\n[Stream cancelled by user]")
+                    break
+
                 if not line:
                     continue
 

@@ -102,6 +102,7 @@ class ThetaCodeApp:
         # ---- Streaming queue ----------------------------------------------
         self._stream_queue: queue.Queue = queue.Queue()
         self._stream_token_counter = 0  # used to assign unique IDs to streaming bubbles
+        self._cancel_event: threading.Event | None = None  # set when user cancels a stream
 
         # ---- Build UI -----------------------------------------------------
         self._build_ui()
@@ -385,6 +386,13 @@ class ThetaCodeApp:
                                    command=self._do_send, cursor="hand2",
                                    state=tk.DISABLED, padx=16, pady=4)
         self._send_btn.pack(side=tk.RIGHT)
+
+        self._cancel_btn = tk.Button(input_row, text="Cancel", bg="#bf7b00", fg="#ffffff",
+                                     relief=tk.FLAT, bd=0, font=("TkDefaultFont", 11, "bold"),
+                                     activebackground="#d49500", activeforeground="#ffffff",
+                                     command=self._do_cancel, cursor="hand2",
+                                     state=tk.DISABLED, padx=16, pady=4)
+        # Hidden initially; shown only while AI is thinking
 
     # -----------------------------------------------------------------------
     # Cleanup
@@ -1113,17 +1121,31 @@ class ThetaCodeApp:
     def _enable_input(self):
         self._input_text.configure(state=tk.NORMAL)
         self._send_btn.configure(state=tk.NORMAL)
+        self._cancel_btn.pack_forget()
+        self._cancel_btn.configure(state=tk.DISABLED)
         self._model_entry.configure(state=tk.NORMAL)
 
     def _disable_input(self):
         self._input_text.configure(state=tk.DISABLED)
         self._send_btn.configure(state=tk.DISABLED)
+        self._cancel_btn.pack_forget()
+        self._cancel_btn.configure(state=tk.DISABLED)
 
     def _clear_messages(self):
         self._messages_text.configure(state=tk.NORMAL)
         self._messages_text.delete("1.0", tk.END)
         self._messages_text.configure(state=tk.DISABLED)
         self._thinking_blocks.clear()
+
+    def _do_cancel(self):
+        """Cancel the current streaming request."""
+        if not self.is_thinking:
+            return
+        evt = self._cancel_event
+        if evt:
+            evt.set()
+        self._cancel_btn.configure(state=tk.DISABLED)
+        self._thinking_label.configure(text="Cancelling…")
 
     def _do_send(self):
         text = self._input_text.get("1.0", tk.END).strip()
@@ -1133,6 +1155,7 @@ class ThetaCodeApp:
         self._input_text.delete("1.0", tk.END)
         self._disable_input()
         self.is_thinking = True
+        self._cancel_event = threading.Event()  # fresh cancel event per send
         self._show_thinking_indicator()
 
         chat_obj = self.chat
@@ -1148,6 +1171,7 @@ class ThetaCodeApp:
                 "cost": 0.0,
             })
             self.is_thinking = False
+            self._cancel_event = None
             self._hide_thinking_indicator()
             self._enable_input()
             return
@@ -1163,7 +1187,7 @@ class ThetaCodeApp:
         # Insert streaming placeholder AFTER the user bubble is already visible.
         self._current_stream_placeholder = self._insert_streaming_placeholder()
 
-        assistant_final = [None]  # mutable container for closure
+        assistant_final = [None]  # mutable container for closure  [Cancelled]
 
         def on_token(content: str):
             self._stream_queue.put(("token", content))
@@ -1185,17 +1209,23 @@ class ThetaCodeApp:
                 return
             self._stream_queue.put(("message", msg))
 
+        cancel_event = self._cancel_event  # capture for closure
+
         def _stream_worker():
             try:
                 result = chat_obj.send_message_stream(
                     text, llm,
                     on_token=on_token,
                     on_new_message=on_new_msg,
+                    cancel_event=cancel_event,
                 )
             except Exception as exc:
                 self._stream_queue.put(("error", str(exc)))
             else:
-                self._stream_queue.put(("done", assistant_final[0]))
+                if cancel_event and cancel_event.is_set():
+                    self._stream_queue.put(("cancelled", assistant_final[0]))
+                else:
+                    self._stream_queue.put(("done", assistant_final[0]))
 
         threading.Thread(target=_stream_worker, daemon=True).start()
 
@@ -1250,6 +1280,45 @@ class ThetaCodeApp:
                     if ph:
                         self._finalize_streaming_bubble(ph, None, error_msg=error)
                     self.is_thinking = False
+                    self._cancel_event = None
+                    self._hide_thinking_indicator()
+                    self._enable_input()
+
+                elif action == "cancelled":
+                    _, final_msg = item
+                    ph = getattr(self, "_current_stream_placeholder", None)
+                    if ph is None and final_msg is not None:
+                        ph = self._insert_streaming_placeholder()
+                        self._current_stream_placeholder = ph
+                    if ph:
+                        if final_msg is not None:
+                            self._finalize_streaming_bubble(ph, final_msg)
+                            # Persist partial response to storage
+                            chat_id = self.chat_id
+                            if chat_id:
+                                final_content = final_msg.get("content", "")
+                                thinking = final_msg.get("thinking", "") or ""
+                                cost_val = final_msg.get("cost", 0.0) or 0.0
+                                llm_name = final_msg.get("llm", "") or ""
+                                self.storage.append_message(
+                                    chat_id=chat_id,
+                                    role="assistant",
+                                    content=final_content,
+                                    thinking=thinking,
+                                    cost=cost_val,
+                                    llm_model=llm_name,
+                                )
+                        else:
+                            self._finalize_streaming_bubble(ph, None)
+                    self._current_stream_placeholder = None
+
+                    # Update cost
+                    chat_obj = self.chat
+                    if chat_obj:
+                        self._cost_label.configure(text=f"Cost: ${chat_obj.get_cost():.4f}")
+
+                    self.is_thinking = False
+                    self._cancel_event = None
                     self._hide_thinking_indicator()
                     self._enable_input()
 
@@ -1305,11 +1374,16 @@ class ThetaCodeApp:
         self._thinking_label.configure(text="AI is thinking…")
         self._thinking_progress.pack(side=tk.LEFT, padx=(8, 0))
         self._thinking_progress.start(10)
+        # Show cancel button to the right of the Send button
+        self._cancel_btn.configure(state=tk.NORMAL)
+        self._cancel_btn.pack(side=tk.RIGHT, padx=(8, 0))
 
     def _hide_thinking_indicator(self):
         self._thinking_label.configure(text="")
         self._thinking_progress.stop()
         self._thinking_progress.pack_forget()
+        self._cancel_btn.pack_forget()
+        self._cancel_btn.configure(state=tk.DISABLED)
 
     def _persist_and_show(self, msg: dict):
         """Persist a message to storage and add it to the UI."""

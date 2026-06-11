@@ -1,4 +1,5 @@
 import shutil
+import threading
 import typing as t
 from pathlib import Path
 from time import sleep
@@ -215,12 +216,16 @@ class Chat:
         llm: LLM,
         on_token: T_STREAM_CALLBACK,
         on_new_message: t.Optional[T_MSG_CALLBACK] = None,
+        cancel_event: t.Optional[threading.Event] = None,
     ) -> str:
         """Send a user message and drive the agentic loop with token streaming.
 
         ``on_token(content)`` is called for each content token as it arrives
         from the LLM. ``on_new_message`` is called for every new conversation
         entry so callers can react immediately.
+
+        ``cancel_event``, when set, causes the streaming request and agentic
+        loop to abort early.
 
         Returns either the final assistant text response or ``Chat.WAITING_FOR_USER``
         if the AI called the ask_user tool.
@@ -231,7 +236,7 @@ class Chat:
         if on_new_message:
             on_new_message(user_entry)
 
-        return self._run_loop(llm, on_new_message, on_token=on_token)
+        return self._run_loop(llm, on_new_message, on_token=on_token, cancel_event=cancel_event)
 
     # ------------------------------------------------------------------
     # Iterative agentic loop (replaces the old recursive _step)
@@ -242,25 +247,35 @@ class Chat:
         llm: LLM,
         on_new_message: t.Optional[T_MSG_CALLBACK] = None,
         on_token: t.Optional[T_STREAM_CALLBACK] = None,
+        cancel_event: t.Optional[threading.Event] = None,
     ) -> str:
         """Drive the conversation forward until a final assistant response or
         an ask_user pause.  Returns the final assistant text or WAITING_FOR_USER.
 
         If ``on_token`` is provided, the LLM's response is streamed in real-time
         via ``generate_stream()``.  Otherwise a single ``generate()`` call is used.
+
+        ``cancel_event``, when set, aborts streaming requests and exits the loop.
         """
 
         MAX_ITERATIONS = 50  # safety guard against infinite loops
         iters = 0
 
         while iters < MAX_ITERATIONS:
+            # Check cancellation between iterations (tool calls)
+            if cancel_event and cancel_event.is_set():
+                for msg in reversed(self._conversation):
+                    if msg['role'] == 'assistant':
+                        return msg['content']
+                return ''
+
             iters += 1
             last = self._conversation[-1]
 
             if last['role'] == 'user':
                 # Ask the LLM for a response — stream if a token callback is given.
                 if on_token is not None:
-                    response = llm.generate_stream(self._conversation, on_token)
+                    response = llm.generate_stream(self._conversation, on_token, cancel_event=cancel_event)
                 else:
                     response = llm.generate(self._conversation)
                 self._cost += response['cost']
