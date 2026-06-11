@@ -9,9 +9,9 @@ import queue
 import threading
 import time
 import tkinter as tk
+import typing as t
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / '.env')
@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from storage import Storage                        # noqa: E402
 from main import Project, ThetaCode, Chat          # noqa: E402
 from llm import get_llm                            # noqa: E402
+from merge import detect_changes, apply_changes, GitignoreMatcher, make_diff  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -209,6 +210,15 @@ class ThetaCodeApp:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         self._projects_list.bind("<<ListboxSelect>>", self._on_project_select)
+
+        # Merge button
+        self._merge_project_btn = tk.Button(f, text="Merge Project", bg=BG_SURFACE_CONTAINER,
+                                            fg=ACCENT_BLUE, relief=tk.FLAT, bd=0,
+                                            activebackground="#3d3d5c", activeforeground=ACCENT_BLUE,
+                                            font=("TkDefaultFont", 10), cursor="hand2",
+                                            command=self._open_merge_dialog,
+                                            state=tk.DISABLED)
+        self._merge_project_btn.pack(fill=tk.X, padx=12, pady=(2, 2))
 
         # Delete button
         self._delete_project_btn = tk.Button(f, text="Delete Project", bg=BG_SURFACE_CONTAINER,
@@ -775,6 +785,7 @@ class ThetaCodeApp:
         self._docker_label.configure(text="")
         self._disable_input()
         self._delete_project_btn.configure(state=tk.NORMAL)
+        self._merge_project_btn.configure(state=tk.NORMAL)
         self._refresh_projects()
         self._refresh_chats()
 
@@ -807,6 +818,7 @@ class ThetaCodeApp:
                 self.storage.delete_project(proj_data["id"])
             self._refresh_projects()
             self._delete_project_btn.configure(state=tk.DISABLED)
+            self._merge_project_btn.configure(state=tk.DISABLED)
 
     def _open_new_project_dialog(self):
         dialog = tk.Toplevel(self.root)
@@ -884,7 +896,10 @@ class ThetaCodeApp:
                 return
 
             try:
+                # Create working copy and store both paths
+                proj = Project.create(name, path)
                 pid = self.storage.create_project(name, path)
+                self.storage.update_project_paths(pid, proj.path, proj.original_path)
             except Exception as exc:
                 error_label.configure(text=str(exc))
                 error_label.pack(fill=tk.X, pady=(0, 8))
@@ -960,7 +975,11 @@ class ThetaCodeApp:
         if not proj_row:
             return
 
-        project = Project.from_path(proj_row["name"], proj_row["path"])
+        project = Project.from_path(
+            proj_row["name"],
+            proj_row["path"],
+            proj_row.get("original_path"),
+        )
         stored_msgs = self.storage.get_messages(chat_id)
 
         def _init_docker():
@@ -1011,6 +1030,212 @@ class ThetaCodeApp:
             self.root.after(0, _show_messages)
 
         threading.Thread(target=_init_docker, daemon=True).start()
+
+    def _open_merge_dialog(self):
+        if self.project_id is None:
+            return
+        proj = self.storage.get_project(self.project_id)
+        if not proj:
+            return
+        working = Path(proj["path"])
+        original = Path(proj.get("original_path") or proj["path"])
+        if not working.exists() or not original.exists():
+            messagebox.showerror("Merge error", "Working or original path missing.", parent=self.root)
+            return
+
+        changes = detect_changes(working, original)
+        if not changes:
+            messagebox.showinfo("Merge", "No changes to merge.", parent=self.root)
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Merge Project")
+        dialog.configure(bg=BG_DARK)
+        dialog.geometry("900x650")
+        dialog.minsize(600, 400)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # Center
+        dialog.geometry("+%d+%d" % (
+            self.root.winfo_rootx() + self.root.winfo_width() // 2 - 450,
+            self.root.winfo_rooty() + self.root.winfo_height() // 2 - 325,
+        ))
+
+        # Toolbar
+        toolbar = tk.Frame(dialog, bg=BG_SURFACE, padx=12, pady=8)
+        toolbar.pack(fill=tk.X)
+
+        def _gitignore_filter():
+            matcher = GitignoreMatcher(original)
+            for ch in changes:
+                if matcher.is_ignored(ch.relative, is_dir=(ch.working_path and ch.working_path.is_dir())):
+                    return True
+            return False
+
+        has_gitignored = _gitignore_filter()
+
+        def select_all():
+            for cb in checkboxes:
+                cb[0].set(True)
+
+        def select_none():
+            for cb in checkboxes:
+                cb[0].set(False)
+
+        def skip_gitignored():
+            matcher = GitignoreMatcher(original)
+            for cb in checkboxes:
+                change = cb[1]
+                is_dir = bool(change.working_path and change.working_path.is_dir())
+                if matcher.is_ignored(change.relative, is_dir=is_dir):
+                    cb[0].set(False)
+
+        tk.Button(toolbar, text="Select All", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
+                  relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10),
+                  activebackground="#3d3d3d", command=select_all).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(toolbar, text="Select None", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
+                  relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10),
+                  activebackground="#3d3d3d", command=select_none).pack(side=tk.LEFT, padx=(0, 8))
+        if has_gitignored:
+            tk.Button(toolbar, text="Skip Gitignored", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
+                      relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10),
+                      activebackground="#3d3d3d", command=skip_gitignored).pack(side=tk.LEFT, padx=(0, 8))
+
+        # Split: list left, diff right
+        paned = tk.PanedWindow(dialog, orient=tk.HORIZONTAL, bg="#3d3d3d",
+                               sashwidth=1, sashrelief=tk.FLAT)
+        paned.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+
+        # Left: scrollable checkboxes
+        left_frame = tk.Frame(paned, bg=BG_SURFACE)
+        paned.add(left_frame, minsize=250, width=400)
+
+        canvas = tk.Canvas(left_frame, bg=BG_SURFACE, highlightthickness=0)
+        vsb = tk.Scrollbar(left_frame, orient=tk.VERTICAL, command=canvas.yview, bg=BG_SURFACE_CONTAINER)
+        scroll_frame = tk.Frame(canvas, bg=BG_SURFACE)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        canvas_window = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        checkboxes: list[tuple[tk.BooleanVar, t.Any]] = []
+        type_colors = {"new": "#5c8a5c", "modified": "#8a8a5c", "deleted": "#8a5c5c"}
+
+        for change in changes:
+            row = tk.Frame(scroll_frame, bg=BG_SURFACE, padx=4, pady=2)
+            row.pack(fill=tk.X)
+            var = tk.BooleanVar(value=True)
+            cb = tk.Checkbutton(row, variable=var, bg=BG_SURFACE,
+                                activebackground=BG_SURFACE, selectcolor=ACCENT_BLUE)
+            cb.pack(side=tk.LEFT)
+            label = tk.Label(row,
+                             text=f"[{change.change_type.upper()}]  {change.relative}",
+                             bg=BG_SURFACE,
+                             fg=type_colors.get(change.change_type, FG_PRIMARY),
+                             font=("TkDefaultFont", 10), anchor="w")
+            label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            checkboxes.append((var, change))
+
+        def _on_frame_configure(event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        scroll_frame.bind("<Configure>", _on_frame_configure)
+
+        # Right: diff preview
+        right_frame = tk.Frame(paned, bg=BG_SURFACE)
+        paned.add(right_frame, minsize=250)
+
+        tk.Label(right_frame, text="Diff Preview", bg=BG_SURFACE, fg=FG_VARIANT,
+                 font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill=tk.X, padx=8, pady=(8, 4))
+        diff_text = tk.Text(right_frame, bg=BG_SURFACE_LOW, fg=FG_PRIMARY,
+                            wrap=tk.WORD, state=tk.DISABLED, relief=tk.FLAT,
+                            bd=0, font=("TkDefaultFont", 10), padx=8, pady=8)
+        diff_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        diff_text.tag_configure("diff_add", foreground="#7cff7c")
+        diff_text.tag_configure("diff_rem", foreground="#ff7c7c")
+        diff_text.tag_configure("diff_hunk", foreground=FG_VARIANT)
+        diff_text.tag_configure("diff_file", foreground=ACCENT_BLUE)
+
+        def _show_diff_for(change):
+            diff_text.configure(state=tk.NORMAL)
+            diff_text.delete("1.0", tk.END)
+            if change.change_type == "modified":
+                diff = make_diff(change)
+                for line in diff.splitlines():
+                    if line.startswith("+") and not line.startswith("+++"):
+                        diff_text.insert(tk.END, line + "\n", "diff_add")
+                    elif line.startswith("-") and not line.startswith("---"):
+                        diff_text.insert(tk.END, line + "\n", "diff_rem")
+                    elif line.startswith("@@"):
+                        diff_text.insert(tk.END, line + "\n", "diff_hunk")
+                    elif line.startswith("---") or line.startswith("+++"):
+                        diff_text.insert(tk.END, line + "\n", "diff_file")
+                    else:
+                        diff_text.insert(tk.END, line + "\n")
+            elif change.change_type == "new":
+                diff_text.insert(tk.END, "New file:\n", "diff_file")
+                if change.working_path and change.working_path.is_file():
+                    try:
+                        content = change.working_path.read_text()
+                        lines = content.splitlines()
+                        for line in lines[:100]:
+                            diff_text.insert(tk.END, "+" + line + "\n", "diff_add")
+                        if len(lines) > 100:
+                            diff_text.insert(tk.END, f"... ({len(lines) - 100} more lines)\n", "diff_hunk")
+                    except Exception:
+                        diff_text.insert(tk.END, "[Binary or unreadable file]\n", "diff_hunk")
+            elif change.change_type == "deleted":
+                diff_text.insert(tk.END, "File deleted\n", "diff_rem")
+                if change.original_path and change.original_path.is_file():
+                    try:
+                        content = change.original_path.read_text()
+                        lines = content.splitlines()
+                        for line in lines[:100]:
+                            diff_text.insert(tk.END, "-" + line + "\n", "diff_rem")
+                        if len(lines) > 100:
+                            diff_text.insert(tk.END, f"... ({len(lines) - 100} more lines)\n", "diff_hunk")
+                    except Exception:
+                        diff_text.insert(tk.END, "[Binary or unreadable file]\n", "diff_hunk")
+            diff_text.configure(state=tk.DISABLED)
+
+        # Bind click on labels to show diff
+        for var, change in checkboxes:
+            for widget in scroll_frame.winfo_children():
+                if isinstance(widget, tk.Frame):
+                    for child in widget.winfo_children():
+                        if isinstance(child, tk.Label) and change.relative in child.cget("text"):
+                            child.bind("<Button-1>", lambda e, c=change: _show_diff_for(c))
+
+        if checkboxes:
+            _show_diff_for(checkboxes[0][1])
+
+        # Bottom buttons
+        btn_frame = tk.Frame(dialog, bg=BG_DARK, padx=12, pady=8)
+        btn_frame.pack(fill=tk.X)
+
+        def do_merge():
+            selected = {cb[1].relative for cb in checkboxes if cb[0].get()}
+            if not selected:
+                dialog.destroy()
+                return
+            try:
+                apply_changes(changes, selected)
+            except Exception as exc:
+                messagebox.showerror("Merge error", str(exc), parent=dialog)
+                return
+            dialog.destroy()
+            messagebox.showinfo("Merge", f"Merged {len(selected)} change(s) successfully.", parent=self.root)
+
+        tk.Button(btn_frame, text="Cancel", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
+                  relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10),
+                  activebackground="#3d3d3d", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(btn_frame, text="Merge Selected", bg=ACCENT_BLUE, fg="#ffffff",
+                  relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10, "bold"),
+                  activebackground="#5ab8ff", command=do_merge).pack(side=tk.RIGHT)
 
     def _confirm_delete_chat(self):
         if self.chat_id is None:

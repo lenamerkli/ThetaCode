@@ -11,9 +11,11 @@ from llm import T_CONVERSATION, T_STREAM_CALLBACK, load_prompt, LLM
 
 
 class Project:
-    def __init__(self, name: str, path: str):
+    def __init__(self, name: str, path: str, original_path: str | None = None):
         self.name = name
         self.path = path
+        # original_path defaults to path for backward compatibility
+        self.original_path = original_path or path
 
     @classmethod
     def create(cls, name: str, original_path: str) -> 'Project':
@@ -22,12 +24,13 @@ class Project:
         src = Path(original_path)
         if src.is_dir():
             shutil.copytree(str(src), str(dest), dirs_exist_ok=True)
-        return cls(name, str(dest))
+        return cls(name, str(dest), original_path=original_path)
 
     @classmethod
-    def from_path(cls, name: str, path: str) -> 'Project':
+    def from_path(cls, name: str, path: str, original_path: str | None = None) -> 'Project':
         """Load an existing project directly from a path without copying."""
-        return cls(name, path)
+        return cls(name, path, original_path=original_path)
+
 
 
 # Type alias for the "on_new_message" callback used by the GUI.

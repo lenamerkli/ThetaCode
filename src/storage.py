@@ -24,10 +24,11 @@ class Storage:
         with self._connect() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS projects (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name       TEXT    NOT NULL UNIQUE,
-                    path       TEXT    NOT NULL,
-                    created_at REAL    NOT NULL
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name           TEXT    NOT NULL UNIQUE,
+                    path           TEXT    NOT NULL,
+                    original_path  TEXT,
+                    created_at     REAL    NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS chats (
@@ -50,6 +51,41 @@ class Storage:
                     FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
                 );
             """)
+            # Migrate old DBs that lack original_path
+            try:
+                conn.execute("SELECT original_path FROM projects LIMIT 1")
+            except sqlite3.OperationalError:
+                conn.execute("ALTER TABLE projects ADD COLUMN original_path TEXT")
+
+        self._migrate_projects_to_working_copy()
+
+    def _migrate_projects_to_working_copy(self):
+        """For projects created before the working-copy feature, set original_path = path."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, path, original_path FROM projects WHERE original_path IS NULL"
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    "UPDATE projects SET original_path = ? WHERE id = ?",
+                    (row["path"], row["id"]),
+                )
+
+    def get_project_original_path(self, project_id: int) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT original_path FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+        return row["original_path"] if row else None
+
+    def update_project_paths(self, project_id: int, working_path: str, original_path: str):
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE projects SET path = ?, original_path = ? WHERE id = ?",
+                (working_path, original_path, project_id),
+            )
+
+
 
     # ------------------------------------------------------------------
     # Projects
@@ -68,14 +104,14 @@ class Storage:
         """Return all projects ordered by creation time."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, name, path, created_at FROM projects ORDER BY created_at"
+                "SELECT id, name, path, original_path, created_at FROM projects ORDER BY created_at"
             ).fetchall()
         return [dict(r) for r in rows]
 
     def get_project(self, project_id: int) -> dict | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, name, path, created_at FROM projects WHERE id = ?",
+                "SELECT id, name, path, original_path, created_at FROM projects WHERE id = ?",
                 (project_id,),
             ).fetchone()
         return dict(row) if row else None
