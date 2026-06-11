@@ -2,11 +2,41 @@ import subprocess
 import os
 import secrets
 import typing as t
+from pathlib import Path
 
 
 IMAGE_NAME = 'thetacode_debian_13'
 CONTAINER_NAME = 'thetacode'
 INTERNAL_PORT = 50000
+
+TOKEN_DIR = Path.home() / '.local' / 'share' / 'ThetaCode'
+TOKEN_FILE = TOKEN_DIR / 'access_token'
+
+SSH_PUBLIC_KEY_FILES = [
+    Path.home() / '.ssh' / 'id_ed25519.pub',
+    Path.home() / '.ssh' / 'id_rsa.pub',
+    Path.home() / '.ssh' / 'id_ecdsa.pub',
+]
+
+
+def _get_or_create_access_token() -> str:
+    TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+    if TOKEN_FILE.exists():
+        return TOKEN_FILE.read_text().strip()
+    token = f"sk-{secrets.token_hex(32)}"
+    TOKEN_FILE.write_text(token)
+    TOKEN_FILE.chmod(0o600)
+    return token
+
+
+def _get_host_ssh_public_keys() -> str:
+    keys = []
+    for key_file in SSH_PUBLIC_KEY_FILES:
+        if key_file.exists():
+            content = key_file.read_text().strip()
+            if content:
+                keys.append(content)
+    return '\n'.join(keys)
 
 
 class Docker:
@@ -14,7 +44,7 @@ class Docker:
         self.image_name = image_name
         self.container_name = container_name
         self.internal_port = internal_port
-        self.access_token = f"sk-{secrets.token_hex(32)}"
+        self.access_token = _get_or_create_access_token()
         if not self._image_exists():
             self._build_image()
 
@@ -38,14 +68,18 @@ class Docker:
             check=True
         )
 
-    def start(self, port: int, additional_volumes: t.Optional[t.List[t.Tuple[str, str]]] = None, env: t.Optional[t.Dict[str, str]] = None):
+    def start(self, port: int, ssh_port: int = 8022, additional_volumes: t.Optional[t.List[t.Tuple[str, str]]] = None, env: t.Optional[t.Dict[str, str]] = None):
         self._stop_existing_container()
+        ssh_public_keys = _get_host_ssh_public_keys()
         cmd = [
             'docker', 'run', '-d', '--name', self.container_name,
             '-p', f'{port}:{self.internal_port}',
+            '-p', f'{ssh_port}:22',
             '-e', f'ACCESS_TOKEN={self.access_token}',
             '-v', f"/opt/jetbrains_gateway:/opt/jetbrains_gateway",
         ]
+        if ssh_public_keys:
+            cmd.extend(['-e', f'SSH_PUBLIC_KEY={ssh_public_keys}'])
         if env:
             for key, value in env.items():
                 cmd.extend(['-e', f'{key}={value}'])

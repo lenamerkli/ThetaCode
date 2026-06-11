@@ -1,6 +1,6 @@
 FROM debian:trixie-slim
 RUN apt-get update && apt-get upgrade -y && apt-get install -y \
-    vim curl wget git python3 python3-pip libxml2-dev libxslt-dev libjpeg62-turbo-dev \
+    vim curl wget git python3 python3-pip libxml2-dev libxslt-dev libjpeg62-turbo-dev openssh-server \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 RUN pip3 install --break-system-packages --no-cache-dir flask requests beautifulsoup4 curl-cffi crawl4ai
 RUN pip3 install --break-system-packages --no-cache-dir playwright \
@@ -8,10 +8,15 @@ RUN pip3 install --break-system-packages --no-cache-dir playwright \
     && python3 -m playwright install-deps chromium
 RUN mkdir -p /home/agent/tools /home/agent/examples
 RUN mkdir -p /home/agent/tmp
+RUN echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config \
+    && echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config \
+    && mkdir -p /run/sshd
 WORKDIR /opt
 COPY app.py /opt/app.py
 COPY opt /opt
 COPY software /home/agent/software
 RUN find /home/agent/software -type f -exec chmod +x {} +
 COPY examples /home/agent/examples
-CMD ["python3", "app.py"]
+COPY entrypoint.sh /opt/entrypoint.sh
+RUN chmod +x /opt/entrypoint.sh
+CMD ["/bin/bash", "/opt/entrypoint.sh"]
