@@ -10,11 +10,16 @@ Execute a bash shell command.
 - directory: str; default: /home/agent/; the working directory to execute the command in
 - venv: str; default: None; the python virtual environment to execute the command in
 - max_chars: int; default: 100000; the maximum number of characters of output to read
-### Example
+### Examples
 <tool_call>
 <tool_name>bash</tool_name>
 <command>ls -la | tail -5</command>
 <directory>/home/agent/examples/</directory>
+</tool_call>
+<tool_call>
+<tool_name>bash</tool_name>
+<command>/home/agent/software/search_the_web "requests.Session.auth" > websearch_requests_session_auth.txt && head -n 15 websearch_requests_session_auth.txt</command>
+<directory>/home/agent/tmp/</directory>
 </tool_call>
 ## read_file
 Read the contents of a file.
@@ -59,7 +64,7 @@ Write contents to a file. The file will be newly created or completely overwritt
 ## replace_in_file
 This is the main method to edit files.
 ### Attributes
-- path: str; required; the path to the file to create or overwrite
+- path: str; required; the path to the file to edit
 - search: str; required; the content to replace (must match exactly, no regex search)
 - replace: str; required; the content to write
 ### Example
@@ -84,7 +89,7 @@ Ask the user a question. Use for clarification or if you are stuck somewhere. Al
 </tool_call>
 <tool_call>
 <tool_name>ask_user</tool_name>
-<question>I have successfully implemented searching on the website and have tested it with edge cases.</question>
+<question>I have implemented searching on the website and have tested it with edge cases. Are you satisfied with my work or is there something that needs to be changed or added?</question>
 </tool_call>
 # Additional Software
 In `/home/agent/software/` there are a lot of use software tools. This includes among other things web search. Use bash commands to both search for the right tool and run the software.
