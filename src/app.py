@@ -50,9 +50,9 @@ DANGER_RED = "#e05555"
 # ---------------------------------------------------------------------------
 def _msg_bgcolor(role: str) -> str:
     return {
-        "user": "#1a3a5c",       # PRIMARY_CONTAINER
-        "assistant": "#3a2a5c",  # SECONDARY_CONTAINER
-    }.get(role, "#2d2d2d")       # SURFACE_CONTAINER
+        "user": "#1a3a5c",
+        "assistant": "#3a2a5c",
+    }.get(role, "#2d2d2d")
 
 
 def _role_label(msg: dict) -> str:
@@ -68,7 +68,6 @@ def _role_label(msg: dict) -> str:
 
 
 def _display_content(msg: dict) -> str:
-    """Strip XML wrapper tags that are internal scaffolding."""
     content = msg.get("content", "")
     for tag in ("user_message", "tool_response"):
         open_tag = f"<{tag}>"
@@ -76,6 +75,25 @@ def _display_content(msg: dict) -> str:
         if content.lstrip().startswith(open_tag) and close_tag in content:
             content = content.split(open_tag, 1)[-1].split(close_tag, 1)[0].strip()
     return content
+
+
+# ---------------------------------------------------------------------------
+# Per-chat state
+# ---------------------------------------------------------------------------
+class _ChatState:
+    def __init__(self, chat_id: int, frame: tk.Frame, messages_text: tk.Text):
+        self.chat_id = chat_id
+        self.frame = frame
+        self.chat: Chat | None = None
+        self.messages_text = messages_text
+        self.is_thinking = False
+        self.stream_queue: queue.Queue = queue.Queue()
+        self.cancel_event: threading.Event | None = None
+        self.current_stream_placeholder: str | None = None
+        self.thinking_blocks: dict = {}
+        self.cost = 0.0
+        self.stream_placeholders: dict = {}
+        self._poll_running = False  # avoid duplicate UI poll loops
 
 
 # ---------------------------------------------------------------------------
@@ -89,62 +107,40 @@ class ThetaCodeApp:
         self.root.geometry("1200x750")
         self.root.minsize(800, 500)
 
-        # Dark theme via ttk style
         self._configure_style()
-
         self.storage = Storage()
 
-        # ---- Mutable app state --------------------------------------------
         self.project_id = None
-        self.chat_id = None
-        self.theta_code = None   # ThetaCode | None
-        self.chat = None         # Chat | None
-        self.is_thinking = False
+        self.active_chat_id: int | None = None
+        self.theta_code = None
+        self._chat_states: dict[int, _ChatState] = {}
+        self._stream_token_counter = 0
+        self._docker_starting = False
 
-        # ---- Streaming queue ----------------------------------------------
-        self._stream_queue: queue.Queue = queue.Queue()
-        self._stream_token_counter = 0  # used to assign unique IDs to streaming bubbles
-        self._cancel_event: threading.Event | None = None  # set when user cancels a stream
-
-        # ---- Build UI -----------------------------------------------------
         self._build_ui()
 
-        # ---- Cleanup on exit ----------------------------------------------
         atexit.register(self._cleanup)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Initial load
         self._refresh_projects()
 
-    # -----------------------------------------------------------------------
-    # Dark theme configuration
-    # -----------------------------------------------------------------------
     def _configure_style(self):
         style = ttk.Style(self.root)
-        # Use clam theme as base
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-
         style.configure(".", background=BG_DARK, foreground=FG_PRIMARY)
         style.configure("TFrame", background=BG_DARK)
         style.configure("TLabel", background=BG_DARK, foreground=FG_PRIMARY)
         style.configure("TButton", background=BG_SURFACE_CONTAINER, foreground=FG_PRIMARY,
                         borderwidth=1, relief="flat", padding=(8, 4))
-        style.map("TButton",
-                  background=[("active", "#3d3d3d"), ("pressed", "#4d4d4d")])
+        style.map("TButton", background=[("active", "#3d3d3d"), ("pressed", "#4d4d4d")])
         style.configure("TEntry", fieldbackground=BG_SURFACE_CONTAINER, foreground=FG_PRIMARY,
                         borderwidth=1, relief="solid")
         style.configure("TProgressbar", troughcolor=BG_SURFACE_CONTAINER, background=ACCENT_BLUE)
-        style.configure("TNotebook", background=BG_DARK, borderwidth=0)
-        style.configure("TNotebook.Tab", background=BG_SURFACE_CONTAINER, foreground=FG_PRIMARY,
-                        padding=(12, 4))
-        style.configure("Vertical.TScrollbar", background=BG_SURFACE_CONTAINER,
-                        troughcolor=BG_DARK, arrowcolor=FG_PRIMARY)
         style.configure("TSeparator", background="#3d3d3d")
 
-        # Listbox styling (not ttk, so use option_add)
         self.root.option_add("*Listbox.background", BG_SURFACE_LOW)
         self.root.option_add("*Listbox.foreground", FG_PRIMARY)
         self.root.option_add("*Listbox.selectBackground", ACCENT_BLUE)
@@ -153,37 +149,25 @@ class ThetaCodeApp:
         self.root.option_add("*Listbox.highlightThickness", 0)
         self.root.option_add("*Listbox.font", ("TkDefaultFont", 11))
 
-    # -----------------------------------------------------------------------
-    # Build the full UI
-    # -----------------------------------------------------------------------
     def _build_ui(self):
-        # Main horizontal PanedWindow for the 3-panel layout
         self._paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, bg="#3d3d3d",
                                      sashwidth=1, sashrelief=tk.FLAT)
         self._paned.pack(fill=tk.BOTH, expand=True)
 
-        # Left panel: Projects
         self._left_frame = tk.Frame(self._paned, bg=BG_SURFACE_LOW, width=SIDE_PANEL_WIDTH)
         self._paned.add(self._left_frame, minsize=150, width=SIDE_PANEL_WIDTH, stretch="never")
         self._build_projects_panel()
 
-        # Middle panel: Chats
         self._mid_frame = tk.Frame(self._paned, bg=BG_SURFACE_LOW, width=SIDE_PANEL_WIDTH)
         self._paned.add(self._mid_frame, minsize=150, width=SIDE_PANEL_WIDTH, stretch="never")
         self._build_chats_panel()
 
-        # Right panel: Messages + input
         self._right_frame = tk.Frame(self._paned, bg=BG_SURFACE)
         self._paned.add(self._right_frame, minsize=300, stretch="always")
         self._build_chat_panel()
 
-    # -----------------------------------------------------------------------
-    # Projects panel (left)
-    # -----------------------------------------------------------------------
     def _build_projects_panel(self):
         f = self._left_frame
-
-        # Header
         header = tk.Frame(f, bg=BG_SURFACE_LOW)
         header.pack(fill=tk.X, padx=12, pady=(10, 4))
         tk.Label(header, text="Projects", bg=BG_SURFACE_LOW, fg=FG_PRIMARY,
@@ -195,7 +179,6 @@ class ThetaCodeApp:
 
         tk.Frame(f, bg="#3d3d3d", height=1).pack(fill=tk.X, padx=4)
 
-        # Project listbox with scrollbar
         list_frame = tk.Frame(f, bg=BG_SURFACE_LOW)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
@@ -209,34 +192,24 @@ class ThetaCodeApp:
         scrollbar.configure(command=self._projects_list.yview)
         self._projects_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
         self._projects_list.bind("<<ListboxSelect>>", self._on_project_select)
 
-        # Merge button
         self._merge_project_btn = tk.Button(f, text="Merge Project", bg=BG_SURFACE_CONTAINER,
                                             fg=ACCENT_BLUE, relief=tk.FLAT, bd=0,
                                             activebackground="#3d3d5c", activeforeground=ACCENT_BLUE,
                                             font=("TkDefaultFont", 10), cursor="hand2",
-                                            command=self._open_merge_dialog,
-                                            state=tk.DISABLED)
+                                            command=self._open_merge_dialog, state=tk.DISABLED)
         self._merge_project_btn.pack(fill=tk.X, padx=12, pady=(2, 2))
 
-        # Delete button
         self._delete_project_btn = tk.Button(f, text="Delete Project", bg=BG_SURFACE_CONTAINER,
                                              fg=DANGER_RED, relief=tk.FLAT, bd=0,
                                              activebackground="#4d3d3d", activeforeground=DANGER_RED,
                                              font=("TkDefaultFont", 10), cursor="hand2",
-                                             command=self._confirm_delete_project,
-                                             state=tk.DISABLED)
+                                             command=self._confirm_delete_project, state=tk.DISABLED)
         self._delete_project_btn.pack(fill=tk.X, padx=12, pady=(2, 10))
 
-    # -----------------------------------------------------------------------
-    # Chats panel (middle)
-    # -----------------------------------------------------------------------
     def _build_chats_panel(self):
         f = self._mid_frame
-
-        # Header
         header = tk.Frame(f, bg=BG_SURFACE_LOW)
         header.pack(fill=tk.X, padx=12, pady=(10, 4))
         tk.Label(header, text="Chats", bg=BG_SURFACE_LOW, fg=FG_PRIMARY,
@@ -248,7 +221,6 @@ class ThetaCodeApp:
 
         tk.Frame(f, bg="#3d3d3d", height=1).pack(fill=tk.X, padx=4)
 
-        # Chat listbox with scrollbar
         list_frame = tk.Frame(f, bg=BG_SURFACE_LOW)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
@@ -262,93 +234,40 @@ class ThetaCodeApp:
         scrollbar.configure(command=self._chats_list.yview)
         self._chats_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
         self._chats_list.bind("<<ListboxSelect>>", self._on_chat_select)
 
-        # Copy JSON button
         self._copy_json_btn = tk.Button(f, text="Copy as JSON", bg=BG_SURFACE_CONTAINER,
                                         fg=FG_TERTIARY, relief=tk.FLAT, bd=0,
                                         activebackground="#2d3d5c", activeforeground=FG_TERTIARY,
                                         font=("TkDefaultFont", 10), cursor="hand2",
-                                        command=self._copy_chat_as_json,
-                                        state=tk.DISABLED)
+                                        command=self._copy_chat_as_json, state=tk.DISABLED)
         self._copy_json_btn.pack(fill=tk.X, padx=12, pady=(2, 2))
 
-        # Delete button
+        self._close_chat_btn = tk.Button(f, text="Close Chat", bg=BG_SURFACE_CONTAINER,
+                                         fg=FG_TERTIARY, relief=tk.FLAT, bd=0,
+                                         activebackground="#2d3d5c", activeforeground=FG_TERTIARY,
+                                         font=("TkDefaultFont", 10), cursor="hand2",
+                                         command=self._on_close_chat, state=tk.DISABLED)
+        self._close_chat_btn.pack(fill=tk.X, padx=12, pady=(2, 2))
+
         self._delete_chat_btn = tk.Button(f, text="Delete Chat", bg=BG_SURFACE_CONTAINER,
                                           fg=DANGER_RED, relief=tk.FLAT, bd=0,
                                           activebackground="#4d3d3d", activeforeground=DANGER_RED,
                                           font=("TkDefaultFont", 10), cursor="hand2",
-                                          command=self._confirm_delete_chat,
-                                          state=tk.DISABLED)
+                                          command=self._confirm_delete_chat, state=tk.DISABLED)
         self._delete_chat_btn.pack(fill=tk.X, padx=12, pady=(2, 10))
 
-    # -----------------------------------------------------------------------
-    # Chat / messages panel (right)
-    # -----------------------------------------------------------------------
     def _build_chat_panel(self):
         f = self._right_frame
 
-        # Messages area: use a Text widget for styled bubbles
-        msg_frame = tk.Frame(f, bg=BG_SURFACE)
-        msg_frame.pack(fill=tk.BOTH, expand=True)
+        self._chat_container = tk.Frame(f, bg=BG_SURFACE)
+        self._chat_container.pack(fill=tk.BOTH, expand=True)
 
-        self._messages_text = tk.Text(
-            msg_frame, bg=BG_SURFACE, fg=FG_PRIMARY,
-            wrap=tk.WORD, state=tk.DISABLED,
-            relief=tk.FLAT, bd=0, highlightthickness=0,
-            padx=12, pady=12, spacing1=4, spacing2=4, spacing3=0,
-            font=("TkDefaultFont", 12),
-        )
-        msg_scrollbar = tk.Scrollbar(msg_frame, orient=tk.VERTICAL, bg=BG_SURFACE_CONTAINER,
-                                     troughcolor=BG_DARK, activebackground="#4d4d4d")
-        self._messages_text.configure(yscrollcommand=msg_scrollbar.set)
-        msg_scrollbar.configure(command=self._messages_text.yview)
-        self._messages_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        msg_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # Configure tags for message bubbles
-        self._messages_text.tag_configure("bubble_user", background=BG_PRIMARY_CONTAINER,
-                                          lmargin1=10, lmargin2=10, rmargin=10,
-                                          spacing1=4, spacing3=4, wrap=tk.WORD)
-        self._messages_text.tag_configure("bubble_ai", background=BG_SECONDARY_CONTAINER,
-                                          lmargin1=10, lmargin2=10, rmargin=10,
-                                          spacing1=4, spacing3=4, wrap=tk.WORD)
-        self._messages_text.tag_configure("bubble_tool", background=BG_SURFACE_CONTAINER,
-                                          lmargin1=10, lmargin2=10, rmargin=10,
-                                          spacing1=4, spacing3=4, wrap=tk.WORD)
-        self._messages_text.tag_configure("bubble_error", background="#5c2a2a",
-                                          lmargin1=10, lmargin2=10, rmargin=10,
-                                          spacing1=4, spacing3=4, wrap=tk.WORD)
-        self._messages_text.tag_configure("role_label", foreground=FG_VARIANT,
-                                          font=("TkDefaultFont", 10, "bold"))
-        self._messages_text.tag_configure("cost_label", foreground=FG_VARIANT,
-                                          font=("TkDefaultFont", 9))
-        self._messages_text.tag_configure("thinking_header", foreground=FG_TERTIARY,
-                                          font=("TkDefaultFont", 10, "italic"))
-        self._messages_text.tag_configure("thinking_body", foreground=FG_VARIANT,
-                                          font=("TkDefaultFont", 10))
-        self._messages_text.tag_configure("content", foreground=FG_PRIMARY,
-                                          font=("TkDefaultFont", 12))
-        self._messages_text.tag_configure("error_text", foreground="#ff6b6b",
-                                          font=("TkDefaultFont", 12))
-
-        # Override the built-in "sel" tag so selection highlighting renders
-        # above custom bubble backgrounds
-        self._messages_text.tag_configure("sel", background="#4a9eff",
-                                          foreground="#ffffff")
-        self._messages_text.tag_raise("sel")
-
-        # Thinking expand/collapse tracking
-        self._thinking_blocks: dict[str, dict] = {}  # block_id -> {start, end, hidden_start, hidden_end, visible}
-
-        # Bottom bar
         bottom = tk.Frame(f, bg=BG_SURFACE)
         bottom.pack(fill=tk.X, side=tk.BOTTOM)
 
         tk.Frame(bottom, bg="#3d3d3d", height=1).pack(fill=tk.X)
 
-        # Status + model row
         status_row = tk.Frame(bottom, bg=BG_SURFACE)
         status_row.pack(fill=tk.X, padx=12, pady=(6, 4))
 
@@ -356,12 +275,9 @@ class ThetaCodeApp:
                                         font=("TkDefaultFont", 11, "italic"))
         self._thinking_label.pack(side=tk.LEFT)
 
-        # Thinking progress bar
         self._thinking_progress = ttk.Progressbar(status_row, mode="indeterminate",
-                                                  length=20, style="TProgressbar")
-        # Hidden initially
+                                                    length=20, style="TProgressbar")
 
-        # Right side of status row
         status_right = tk.Frame(status_row, bg=BG_SURFACE)
         status_right.pack(side=tk.RIGHT)
 
@@ -383,7 +299,6 @@ class ThetaCodeApp:
                                       font=("TkDefaultFont", 10, "italic"))
         self._docker_label.pack(side=tk.LEFT, padx=(12, 0))
 
-        # Input row
         input_row = tk.Frame(bottom, bg=BG_SURFACE)
         input_row.pack(fill=tk.X, padx=12, pady=(4, 12))
 
@@ -392,12 +307,8 @@ class ThetaCodeApp:
                                    font=("TkDefaultFont", 12), height=2, wrap=tk.WORD,
                                    padx=10, pady=8)
         self._input_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-
-        # Bind Enter to send, Shift+Enter for newline
         self._input_text.bind("<Return>", self._on_input_return)
         self._input_text.bind("<Shift-Return>", self._on_input_shift_return)
-
-        # Disable input initially
         self._input_text.configure(state=tk.DISABLED)
 
         self._send_btn = tk.Button(input_row, text="Send", bg=ACCENT_BLUE, fg="#ffffff",
@@ -412,11 +323,53 @@ class ThetaCodeApp:
                                      activebackground="#d49500", activeforeground="#ffffff",
                                      command=self._do_cancel, cursor="hand2",
                                      state=tk.DISABLED, padx=16, pady=4)
-        # Hidden initially; shown only while AI is thinking
 
-    # -----------------------------------------------------------------------
-    # Cleanup
-    # -----------------------------------------------------------------------
+    def _create_chat_widget(self) -> tuple[tk.Frame, tk.Text]:
+        frame = tk.Frame(self._chat_container, bg=BG_SURFACE)
+        text_widget = tk.Text(
+            frame, bg=BG_SURFACE, fg=FG_PRIMARY,
+            wrap=tk.WORD, state=tk.DISABLED,
+            relief=tk.FLAT, bd=0, highlightthickness=0,
+            padx=12, pady=12, spacing1=4, spacing2=4, spacing3=0,
+            font=("TkDefaultFont", 12),
+        )
+        msg_scrollbar = tk.Scrollbar(frame, orient=tk.VERTICAL, bg=BG_SURFACE_CONTAINER,
+                                     troughcolor=BG_DARK, activebackground="#4d4d4d")
+        text_widget.configure(yscrollcommand=msg_scrollbar.set)
+        msg_scrollbar.configure(command=text_widget.yview)
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        msg_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Tags
+        text_widget.tag_configure("bubble_user", background=BG_PRIMARY_CONTAINER,
+                                  lmargin1=10, lmargin2=10, rmargin=10,
+                                  spacing1=4, spacing3=4, wrap=tk.WORD)
+        text_widget.tag_configure("bubble_ai", background=BG_SECONDARY_CONTAINER,
+                                  lmargin1=10, lmargin2=10, rmargin=10,
+                                  spacing1=4, spacing3=4, wrap=tk.WORD)
+        text_widget.tag_configure("bubble_tool", background=BG_SURFACE_CONTAINER,
+                                  lmargin1=10, lmargin2=10, rmargin=10,
+                                  spacing1=4, spacing3=4, wrap=tk.WORD)
+        text_widget.tag_configure("bubble_error", background="#5c2a2a",
+                                  lmargin1=10, lmargin2=10, rmargin=10,
+                                  spacing1=4, spacing3=4, wrap=tk.WORD)
+        text_widget.tag_configure("role_label", foreground=FG_VARIANT,
+                                  font=("TkDefaultFont", 10, "bold"))
+        text_widget.tag_configure("cost_label", foreground=FG_VARIANT,
+                                  font=("TkDefaultFont", 9))
+        text_widget.tag_configure("thinking_header", foreground=FG_TERTIARY,
+                                  font=("TkDefaultFont", 10, "italic"))
+        text_widget.tag_configure("thinking_body", foreground=FG_VARIANT,
+                                  font=("TkDefaultFont", 10))
+        text_widget.tag_configure("content", foreground=FG_PRIMARY,
+                                  font=("TkDefaultFont", 12))
+        text_widget.tag_configure("error_text", foreground="#ff6b6b",
+                                  font=("TkDefaultFont", 12))
+        text_widget.tag_configure("sel", background="#4a9eff", foreground="#ffffff")
+        text_widget.tag_raise("sel")
+
+        return frame, text_widget
+
     def _cleanup(self):
         tc = self.theta_code
         if tc:
@@ -426,59 +379,35 @@ class ThetaCodeApp:
                 pass
 
     def _on_close(self):
-        """Show a shutdown indicator while stopping Docker, then destroy."""
-        # Prevent double-close
         if hasattr(self, '_shutting_down') and self._shutting_down:
             return
         self._shutting_down = True
-
-        # Hide all panels
         self._paned.pack_forget()
-
-        # Create full-window overlay
         self._shutdown_overlay = tk.Frame(self.root, bg=BG_DARK)
         self._shutdown_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
-
-        tk.Label(
-            self._shutdown_overlay, bg=BG_DARK, fg=FG_PRIMARY,
-            text="Shutting down ThetaCode…",
-            font=("TkDefaultFont", 18, "bold"),
-        ).pack(expand=True, pady=(0, 12))
-
-        progress = ttk.Progressbar(
-            self._shutdown_overlay, mode="indeterminate",
-            length=200, style="TProgressbar",
-        )
+        tk.Label(self._shutdown_overlay, bg=BG_DARK, fg=FG_PRIMARY,
+                 text="Shutting down ThetaCode…", font=("TkDefaultFont", 18, "bold")).pack(expand=True, pady=(0, 12))
+        progress = ttk.Progressbar(self._shutdown_overlay, mode="indeterminate", length=200, style="TProgressbar")
         progress.pack(expand=True)
         progress.start(10)
-
-        # Run cleanup in background thread
         cleanup_done = [False]
-
         def _do_cleanup():
             self._cleanup()
             cleanup_done[0] = True
-
         threading.Thread(target=_do_cleanup, daemon=True).start()
-
-        # Poll until cleanup finishes, with a timeout
         start_time = [time.time()]
-
         def _poll_shutdown():
-            elapsed = time.time() - start_time[0]
-            if cleanup_done[0] or elapsed > 5.0:  # 5-second safety timeout
+            if cleanup_done[0] or time.time() - start_time[0] > 5.0:
                 progress.stop()
                 self.root.destroy()
             else:
                 self.root.after(100, _poll_shutdown)
-
         self.root.after(100, _poll_shutdown)
 
     # -----------------------------------------------------------------------
     # Message display helpers
     # -----------------------------------------------------------------------
     def _populate_listbox(self, listbox: tk.Listbox, items: list, data_key: str):
-        """Populate a listbox with item names, storing IDs."""
         listbox.delete(0, tk.END)
         listbox._cached_data = {}
         for i, item in enumerate(items):
@@ -493,270 +422,191 @@ class ThetaCodeApp:
         data = getattr(listbox, "_cached_data", {})
         return data.get(idx)
 
-    def _add_message_bubble(self, msg: dict):
-        """Append a styled bubble to the messages Text widget."""
+    def _get_active_chat_state(self) -> _ChatState | None:
+        if self.active_chat_id is None:
+            return None
+        return self._chat_states.get(self.active_chat_id)
+
+    def _add_message_bubble(self, msg: dict, chat_state: _ChatState | None = None):
+        if chat_state is None:
+            chat_state = self._get_active_chat_state()
+            if not chat_state:
+                return
+        text_widget = chat_state.messages_text
         role = msg.get("role", "")
         if role == "system":
             return
-
-        text_widget = self._messages_text
         text_widget.configure(state=tk.NORMAL)
-
         label = _role_label(msg)
         content = _display_content(msg)
         thinking = msg.get("thinking", "") or ""
         cost = msg.get("cost", 0.0) or 0.0
         is_error = "[Runtime error]" in content or "[Configuration error]" in content
-
-        # Choose tag based on role
         if is_error:
             bubble_tag = "bubble_error"
         elif role == "user":
             if content.lstrip().startswith("<tool_response>"):
-                content = _display_content(msg)
                 bubble_tag = "bubble_tool"
             else:
                 bubble_tag = "bubble_user"
         else:
             bubble_tag = "bubble_ai"
-
-        # Start of bubble (store position for potential thinking collapse)
-        bubble_start = text_widget.index(tk.END + "-1c")
-        if bubble_start.startswith("1.0"):
-            # If this is the first insertion, remove the auto line start
-            pass
-
-        # Role label
         text_widget.insert(tk.END, f"{label}\n", (bubble_tag, "role_label"))
-
-        # Thinking block
-        thinking_hidden_start = None
-        thinking_hidden_end = None
         if thinking:
-            thinking_id = f"thinking_{id(msg)}_{len(self._thinking_blocks)}"
-            unique_header_tag = f"thinking_header_{thinking_id}"
-            unique_body_tag = f"thinking_body_{thinking_id}"
-
-            # Configure unique tags with the same visual style
+            thinking_id = f"thinking_{id(msg)}_{len(chat_state.thinking_blocks)}"
+            unique_header_tag = f"th_{thinking_id}"
+            unique_body_tag = f"tb_{thinking_id}"
             text_widget.tag_configure(unique_header_tag, foreground="#7eb6ff",
                                       font=("TkDefaultFont", 10, "italic"))
             text_widget.tag_configure(unique_body_tag, foreground="#a0a0a0",
                                       font=("TkDefaultFont", 10))
-
-            text_widget.insert(tk.END, "🧠 Show / hide thinking\n", (bubble_tag, unique_header_tag))
-            thinking_hidden_start = text_widget.index(tk.END + "-1c")
-
+            text_widget.insert(tk.END, "🧠 Show/hide thinking\n", (bubble_tag, unique_header_tag))
+            ths = text_widget.index(tk.END + "-1c")
             text_widget.insert(tk.END, f"{thinking}\n", (bubble_tag, unique_body_tag))
-            thinking_hidden_end = text_widget.index(tk.END + "-1c")
-
-            # Save the thinking text so we can restore it after hide
-            saved_thinking = text_widget.get(thinking_hidden_start, thinking_hidden_end)
-
-            # Store for toggle
-            self._thinking_blocks[thinking_id] = {
-                "start": thinking_hidden_start,
-                "end": thinking_hidden_end,
-                "visible": True,
-                "body_tag": unique_body_tag,
-                "header_tag": unique_header_tag,
-                "bubble_tag": bubble_tag,
-                "saved_content": saved_thinking,
+            the = text_widget.index(tk.END + "-1c")
+            saved_thinking = text_widget.get(ths, the)
+            chat_state.thinking_blocks[thinking_id] = {
+                "start": ths, "end": the, "visible": True,
+                "body_tag": unique_body_tag, "header_tag": unique_header_tag,
+                "bubble_tag": bubble_tag, "saved_content": saved_thinking,
             }
-
-            # Bind click handler to the UNIQUE header tag (not shared)
             text_widget.tag_bind(unique_header_tag, "<Button-1>",
-                                 lambda e, bid=thinking_id: self._toggle_thinking(bid))
-
-        # Content
+                                 lambda e, bid=thinking_id, st=chat_state: self._toggle_thinking(bid, st))
         text_widget.insert(tk.END, f"{content}\n", (bubble_tag, "content"))
-
-        # Cost
         if cost > 0:
             text_widget.insert(tk.END, f"${cost:.6f}\n", (bubble_tag, "cost_label"))
-
-        # Separator gap
         text_widget.insert(tk.END, "\n")
-
         text_widget.configure(state=tk.DISABLED)
-        self._scroll_to_bottom()
+        text_widget.see(tk.END)
 
-    def _insert_streaming_placeholder(self) -> str:
-        """Insert an empty AI bubble that will be updated with tokens. Returns a
-        placeholder ID for later replacement."""
-        text_widget = self._messages_text
+    def _insert_streaming_placeholder(self, chat_state: _ChatState | None = None) -> str:
+        if chat_state is None:
+            chat_state = self._get_active_chat_state()
+            if not chat_state:
+                return ""
+        text_widget = chat_state.messages_text
         text_widget.configure(state=tk.NORMAL)
-
-        role_start = text_widget.index(tk.END)
-
         text_widget.insert(tk.END, "AI\n", ("bubble_ai", "role_label"))
         content_start = text_widget.index(tk.END)
-        text_widget.insert(tk.END, "\n", ("bubble_ai", "content"))  # placeholder line
-
+        text_widget.insert(tk.END, "\n", ("bubble_ai", "content"))
         content_end = text_widget.index(tk.END + "-1c")
-
         text_widget.configure(state=tk.DISABLED)
-        self._scroll_to_bottom()
-
+        text_widget.see(tk.END)
         self._stream_token_counter += 1
         placeholder_id = f"_stream_{self._stream_token_counter}"
-
-        text_widget._stream_placeholders = getattr(text_widget, "_stream_placeholders", {})
-        text_widget._stream_placeholders[placeholder_id] = {
-            "role_start": role_start,
-            "content_start": content_start,
-            "content_end": content_end,
-            "tokens": [],
-            "finalized": False,
+        chat_state.stream_placeholders[placeholder_id] = {
+            "content_start": content_start, "content_end": content_end,
+            "tokens": [], "finalized": False,
         }
-
         return placeholder_id
 
-    def _append_streaming_token(self, placeholder_id: str, token: str):
-        """Append a token to the streaming bubble."""
-        text_widget = self._messages_text
-        placeholders = getattr(text_widget, "_stream_placeholders", {})
-        info = placeholders.get(placeholder_id)
+    def _append_streaming_token(self, placeholder_id: str, token: str, chat_state: _ChatState | None = None):
+        if chat_state is None:
+            chat_state = self._get_active_chat_state()
+            if not chat_state:
+                return
+        info = chat_state.stream_placeholders.get(placeholder_id)
         if not info or info.get("finalized"):
             return
-
         info["tokens"].append(token)
-
+        text_widget = chat_state.messages_text
         text_widget.configure(state=tk.NORMAL)
-        # Delete old content and re-insert full text
         text_widget.delete(info["content_start"], info["content_end"])
         full_text = "".join(info["tokens"])
         text_widget.insert(info["content_start"], f"{full_text}\n", ("bubble_ai", "content"))
         info["content_end"] = text_widget.index(tk.END + "-1c")
         text_widget.configure(state=tk.DISABLED)
-        self._scroll_to_bottom()
+        text_widget.see(tk.END)
 
     def _finalize_streaming_bubble(self, placeholder_id: str, final_msg: dict | None,
-                                   error_msg: str | None = None):
-        """Replace the streaming placeholder with the final assistant bubble or error."""
-        text_widget = self._messages_text
-        placeholders = getattr(text_widget, "_stream_placeholders", {})
-        info = placeholders.get(placeholder_id)
+                                   error_msg: str | None = None,
+                                   chat_state: _ChatState | None = None):
+        if chat_state is None:
+            chat_state = self._get_active_chat_state()
+            if not chat_state:
+                return
+        info = chat_state.stream_placeholders.get(placeholder_id)
         if not info:
             return
-
         info["finalized"] = True
-
+        text_widget = chat_state.messages_text
         text_widget.configure(state=tk.NORMAL)
-
-        # Delete the content area (keep the role label intact)
         text_widget.delete(info["content_start"], info["content_end"])
-
-        mark = f"_finalize_mark_{placeholder_id}"
+        mark = f"_fm_{placeholder_id}"
         text_widget.mark_set(mark, info["content_start"])
-
         if error_msg:
-            text_widget.insert(mark, f"[Runtime error] {error_msg}\n",
-                              ("bubble_ai", "error_text"))
+            text_widget.insert(mark, f"[Runtime error] {error_msg}\n", ("bubble_ai", "error_text"))
             text_widget.insert(mark, "\n", ("bubble_ai", "content"))
-            self._cost_label.configure(text="Cost: $0.0000")
+            if self.active_chat_id == chat_state.chat_id:
+                self._cost_label.configure(text="Cost: $0.0000")
         elif final_msg:
-            final_content = final_msg.get("content", "")
+            fc = final_msg.get("content", "")
             thinking = final_msg.get("thinking", "") or ""
             cost_val = final_msg.get("cost", 0.0) or 0.0
-
-            # Add thinking if present
             if thinking:
-                thinking_id = f"thinking_final_{placeholder_id}"
-                unique_header_tag = f"thinking_header_{thinking_id}"
-                unique_body_tag = f"thinking_body_{thinking_id}"
-
-                # Configure unique tags with the same visual style
-                text_widget.tag_configure(unique_header_tag, foreground="#7eb6ff",
-                                          font=("TkDefaultFont", 10, "italic"))
-                text_widget.tag_configure(unique_body_tag, foreground="#a0a0a0",
-                                          font=("TkDefaultFont", 10))
-
-                text_widget.insert(mark, "🧠 Show / hide thinking\n",
-                                  ("bubble_ai", unique_header_tag))
-                thinking_hidden_start = text_widget.index(mark)
-                text_widget.insert(mark, f"{thinking}\n",
-                                   ("bubble_ai", unique_body_tag))
-                thinking_hidden_end = text_widget.index(mark)
-
-                # Save the thinking text so we can restore it after hide
-                saved_thinking = text_widget.get(thinking_hidden_start, thinking_hidden_end)
-
-                self._thinking_blocks[thinking_id] = {
-                    "start": thinking_hidden_start,
-                    "end": thinking_hidden_end,
-                    "visible": True,
-                    "body_tag": unique_body_tag,
-                    "header_tag": unique_header_tag,
-                    "bubble_tag": "bubble_ai",
-                    "saved_content": saved_thinking,
+                tid = f"tf_{placeholder_id}"
+                uht = f"th_{tid}"
+                ubt = f"tb_{tid}"
+                text_widget.tag_configure(uht, foreground="#7eb6ff", font=("TkDefaultFont", 10, "italic"))
+                text_widget.tag_configure(ubt, foreground="#a0a0a0", font=("TkDefaultFont", 10))
+                text_widget.insert(mark, "🧠 Show/hide thinking\n", ("bubble_ai", uht))
+                ths = text_widget.index(mark)
+                text_widget.insert(mark, f"{thinking}\n", ("bubble_ai", ubt))
+                the = text_widget.index(mark)
+                st = text_widget.get(ths, the)
+                chat_state.thinking_blocks[tid] = {
+                    "start": ths, "end": the, "visible": True,
+                    "body_tag": ubt, "header_tag": uht, "bubble_tag": "bubble_ai",
+                    "saved_content": st,
                 }
-                text_widget.tag_bind(unique_header_tag, "<Button-1>",
-                                     lambda e, bid=thinking_id: self._toggle_thinking(bid))
-
-                # Insert final content after thinking
-                text_widget.insert(mark, f"{final_content}\n", ("bubble_ai", "content"))
+                text_widget.tag_bind(uht, "<Button-1>", lambda e, bid=tid, st2=chat_state: self._toggle_thinking(bid, st2))
+                text_widget.insert(mark, f"{fc}\n", ("bubble_ai", "content"))
             else:
-                text_widget.insert(mark, f"{final_content}\n", ("bubble_ai", "content"))
-
+                text_widget.insert(mark, f"{fc}\n", ("bubble_ai", "content"))
             if cost_val > 0:
                 text_widget.insert(mark, f"${cost_val:.6f}\n", ("bubble_ai", "cost_label"))
-
-            # Update cost display
-            chat_obj = self.chat
-            if chat_obj:
-                self._cost_label.configure(text=f"Cost: ${chat_obj.get_cost():.4f}")
-
-            # Separator
             text_widget.insert(mark, "\n", ("bubble_ai", "content"))
-
         try:
             text_widget.mark_unset(mark)
         except tk.TclError:
             pass
-
         text_widget.configure(state=tk.DISABLED)
-        self._scroll_to_bottom()
+        text_widget.see(tk.END)
+        if placeholder_id in chat_state.stream_placeholders:
+            del chat_state.stream_placeholders[placeholder_id]
 
-        # Clean up placeholder
-        if placeholder_id in placeholders:
-            del placeholders[placeholder_id]
-
-    def _scroll_to_bottom(self):
-        self._messages_text.see(tk.END)
-
-    def _toggle_thinking(self, thinking_id: str):
-        """Toggle visibility of a thinking block."""
-        info = self._thinking_blocks.get(thinking_id)
+    def _toggle_thinking(self, thinking_id: str, chat_state: _ChatState):
+        info = chat_state.thinking_blocks.get(thinking_id)
         if not info:
             return
-
-        text_widget = self._messages_text
+        text_widget = chat_state.messages_text
         text_widget.configure(state=tk.NORMAL)
-
         if info["visible"]:
-            # Hide: save the current content, then delete the thinking lines
-            # Re-read the text in case it changed (unlikely but safe)
             try:
-                current_text = text_widget.get(info["start"], info["end"])
-                if current_text.strip():
-                    info["saved_content"] = current_text
+                ct = text_widget.get(info["start"], info["end"])
+                if ct.strip():
+                    info["saved_content"] = ct
             except tk.TclError:
                 pass
             text_widget.delete(info["start"], info["end"])
             info["visible"] = False
         else:
-            # Show: re-insert the saved content with the proper tags
-            bubble_tag = info.get("bubble_tag", "bubble_ai")
-            body_tag = info.get("body_tag", "thinking_body")
-            saved = info.get("saved_content", "")
-            if saved:
-                text_widget.insert(info["start"], saved, (bubble_tag, body_tag))
-                # Adjust end position to match the restored content
-                new_end = text_widget.index(f"{info['start']}+{len(saved.split(chr(10)))-1}l lineend")
-                info["end"] = new_end
+            bt = info.get("bubble_tag", "bubble_ai")
+            bd = info.get("body_tag", "thinking_body")
+            sc = info.get("saved_content", "")
+            if sc:
+                text_widget.insert(info["start"], sc, (bt, bd))
+                ne = text_widget.index(f"{info['start']}+{len(sc.split(chr(10)))-1}l lineend")
+                info["end"] = ne
             info["visible"] = True
-
         text_widget.configure(state=tk.DISABLED)
+
+    def _clear_messages(self, chat_state: _ChatState):
+        text_widget = chat_state.messages_text
+        text_widget.configure(state=tk.NORMAL)
+        text_widget.delete("1.0", tk.END)
+        text_widget.configure(state=tk.DISABLED)
+        chat_state.thinking_blocks.clear()
 
     # -----------------------------------------------------------------------
     # Project list operations
@@ -764,8 +614,6 @@ class ThetaCodeApp:
     def _refresh_projects(self):
         items = self.storage.get_projects()
         self._populate_listbox(self._projects_list, items, "id")
-
-        # Re-select if previously selected
         if self.project_id is not None:
             for i, item in enumerate(items):
                 if item["id"] == self.project_id:
@@ -780,17 +628,14 @@ class ThetaCodeApp:
         pid = data["id"]
         if self.project_id == pid:
             return
-
-        # Tear down old docker
+        for cid in list(self._chat_states.keys()):
+            self._close_chat(cid)
         old_tc = self.theta_code
         if old_tc:
             threading.Thread(target=old_tc.stop_docker, daemon=True).start()
             self.theta_code = None
-
         self.project_id = pid
-        self.chat_id = None
-        self.chat = None
-        self._clear_messages()
+        self.active_chat_id = None
         self._cost_label.configure(text="Cost: $0.0000")
         self._docker_label.configure(text="")
         self._disable_input()
@@ -804,26 +649,20 @@ class ThetaCodeApp:
             return
         proj_data = self._get_selected_listbox_data(self._projects_list)
         name = proj_data["name"] if proj_data else "this project"
-
-        if messagebox.askyesno(
-            "Delete project?",
-            f"Delete '{name}'?\n\nAll chats and messages will be permanently deleted.",
-            parent=self.root,
-            icon="warning",
-        ):
+        if messagebox.askyesno("Delete project?", f"Delete '{name}'?\n\nAll chats and messages will be permanently deleted.", parent=self.root, icon="warning"):
             if proj_data and self.project_id == proj_data["id"]:
+                for cid in list(self._chat_states.keys()):
+                    self._close_chat(cid)
                 old_tc = self.theta_code
                 if old_tc:
                     threading.Thread(target=old_tc.stop_docker, daemon=True).start()
                     self.theta_code = None
                 self.project_id = None
-                self.chat_id = None
-                self.chat = None
-                self._clear_messages()
-                self._disable_input()
+                self.active_chat_id = None
+                self._cost_label.configure(text="Cost: $0.0000")
                 self._docker_label.configure(text="")
+                self._disable_input()
                 self._refresh_chats()
-
             if proj_data:
                 self.storage.delete_project(proj_data["id"])
             self._refresh_projects()
@@ -837,57 +676,32 @@ class ThetaCodeApp:
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
-
-        # Center on parent
-        dialog.geometry("+%d+%d" % (
-            self.root.winfo_rootx() + self.root.winfo_width() // 2 - 220,
-            self.root.winfo_rooty() + self.root.winfo_height() // 2 - 80,
-        ))
-
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + self.root.winfo_width() // 2 - 220, self.root.winfo_rooty() + self.root.winfo_height() // 2 - 80))
         frame = tk.Frame(dialog, bg=BG_SURFACE_CONTAINER, padx=20, pady=20)
         frame.pack()
-
-        tk.Label(frame, text="Project Name", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
-                 font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill=tk.X)
+        tk.Label(frame, text="Project Name", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY, font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill=tk.X)
         name_var = tk.StringVar()
-        name_entry = tk.Entry(frame, textvariable=name_var, bg=BG_SURFACE, fg=FG_PRIMARY,
-                              relief=tk.FLAT, bd=0, insertbackground=FG_PRIMARY,
-                              font=("TkDefaultFont", 11), width=40)
+        name_entry = tk.Entry(frame, textvariable=name_var, bg=BG_SURFACE, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, insertbackground=FG_PRIMARY, font=("TkDefaultFont", 11), width=40)
         name_entry.pack(fill=tk.X, pady=(4, 12))
         name_entry.focus_set()
-
-        tk.Label(frame, text="Project Path", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
-                 font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill=tk.X)
+        tk.Label(frame, text="Project Path", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY, font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill=tk.X)
         path_frame = tk.Frame(frame, bg=BG_SURFACE_CONTAINER)
         path_frame.pack(fill=tk.X, pady=(4, 16))
-
         path_var = tk.StringVar()
-        path_entry = tk.Entry(path_frame, textvariable=path_var, bg=BG_SURFACE, fg=FG_PRIMARY,
-                              relief=tk.FLAT, bd=0, insertbackground=FG_PRIMARY,
-                              font=("TkDefaultFont", 11), width=32)
+        path_entry = tk.Entry(path_frame, textvariable=path_var, bg=BG_SURFACE, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, insertbackground=FG_PRIMARY, font=("TkDefaultFont", 11), width=32)
         path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
         def browse():
-            path = filedialog.askdirectory(title="Select project folder", parent=dialog)
-            if path:
-                path_var.set(path)
-
-        tk.Button(path_frame, text="📁", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
-                  relief=tk.FLAT, bd=0, font=("TkDefaultFont", 14),
-                  activebackground="#3d3d3d", activeforeground=FG_PRIMARY,
-                  command=browse, cursor="hand2").pack(side=tk.RIGHT, padx=(4, 0))
-
-        error_label = tk.Label(frame, text="", bg=BG_SURFACE_CONTAINER, fg=DANGER_RED,
-                               font=("TkDefaultFont", 10))
-
+            p = filedialog.askdirectory(title="Select project folder", parent=dialog)
+            if p:
+                path_var.set(p)
+        tk.Button(path_frame, text="📁", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, font=("TkDefaultFont", 14), activebackground="#3d3d3d", activeforeground=FG_PRIMARY, command=browse, cursor="hand2").pack(side=tk.RIGHT, padx=(4, 0))
+        error_label = tk.Label(frame, text="", bg=BG_SURFACE_CONTAINER, fg=DANGER_RED, font=("TkDefaultFont", 10))
         btn_frame = tk.Frame(frame, bg=BG_SURFACE_CONTAINER)
         btn_frame.pack(fill=tk.X)
-
         def create():
             name = name_var.get().strip()
             path = path_var.get().strip()
             has_error = False
-
             if not name:
                 error_label.configure(text="Name is required")
                 error_label.pack(fill=tk.X, pady=(0, 8))
@@ -901,12 +715,9 @@ class ThetaCodeApp:
                 error_label.configure(text="Path does not exist")
                 error_label.pack(fill=tk.X, pady=(0, 8))
                 has_error = True
-
             if has_error:
                 return
-
             try:
-                # Create working copy and store both paths
                 proj = Project.create(name, path)
                 pid = self.storage.create_project(name, path)
                 self.storage.update_project_paths(pid, proj.path, proj.original_path)
@@ -914,22 +725,11 @@ class ThetaCodeApp:
                 error_label.configure(text=str(exc))
                 error_label.pack(fill=tk.X, pady=(0, 8))
                 return
-
             dialog.destroy()
             self._refresh_projects()
-            # Simulate selection
             self._select_project_by_id(pid)
-
-        tk.Button(btn_frame, text="Cancel", bg=BG_SURFACE, fg=FG_PRIMARY,
-                  relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10),
-                  activebackground="#3d3d3d", activeforeground=FG_PRIMARY,
-                  command=dialog.destroy, cursor="hand2").pack(side=tk.RIGHT, padx=(8, 0))
-        tk.Button(btn_frame, text="Create", bg=ACCENT_BLUE, fg="#ffffff",
-                  relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10, "bold"),
-                  activebackground="#5ab8ff", activeforeground="#ffffff",
-                  command=create, cursor="hand2").pack(side=tk.RIGHT)
-
-        # Bind Enter
+        tk.Button(btn_frame, text="Cancel", bg=BG_SURFACE, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10), activebackground="#3d3d3d", activeforeground=FG_PRIMARY, command=dialog.destroy, cursor="hand2").pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(btn_frame, text="Create", bg=ACCENT_BLUE, fg="#ffffff", relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10, "bold"), activebackground="#5ab8ff", activeforeground="#ffffff", command=create, cursor="hand2").pack(side=tk.RIGHT)
         dialog.bind("<Return>", lambda e: create())
 
     def _select_project_by_id(self, pid: int):
@@ -949,100 +749,187 @@ class ThetaCodeApp:
         self._chats_list.delete(0, tk.END)
         self._delete_chat_btn.configure(state=tk.DISABLED)
         self._copy_json_btn.configure(state=tk.DISABLED)
+        self._close_chat_btn.configure(state=tk.DISABLED)
         if self.project_id is None:
             return
-
         items = self.storage.get_chats(self.project_id)
-        self._populate_listbox(self._chats_list, items, "id")
-
-        # Re-select if previously selected
-        if self.chat_id is not None:
+        self._chats_list._cached_data = {}
+        for i, item in enumerate(items):
+            name = item["name"]
+            if item["id"] in self._chat_states:
+                name = f"● {name}"
+            self._chats_list.insert(tk.END, name)
+            self._chats_list._cached_data[i] = item
+        if self.active_chat_id is not None:
             for i, item in enumerate(items):
-                if item["id"] == self.chat_id:
+                if item["id"] == self.active_chat_id:
                     self._chats_list.select_set(i)
                     self._chats_list.see(i)
                     break
+        selected = self._get_selected_listbox_data(self._chats_list)
+        if selected:
+            cid = selected["id"]
+            self._delete_chat_btn.configure(state=tk.NORMAL)
+            self._copy_json_btn.configure(state=tk.NORMAL)
+            self._close_chat_btn.configure(state=tk.NORMAL if cid in self._chat_states else tk.DISABLED)
 
     def _on_chat_select(self, event=None):
         data = self._get_selected_listbox_data(self._chats_list)
         if not data:
             return
         cid = data["id"]
-        if self.chat_id == cid:
-            return
-        self._select_chat(cid)
-
-    def _select_chat(self, chat_id: int):
-        self.chat_id = chat_id
-        self.chat = None
-        self._disable_input()
-        self._clear_messages()
-        self._docker_label.configure(text="Starting Docker environment…")
-        self._cost_label.configure(text="Cost: $0.0000")
-        self._refresh_chats()
         self._delete_chat_btn.configure(state=tk.NORMAL)
         self._copy_json_btn.configure(state=tk.NORMAL)
+        self._close_chat_btn.configure(state=tk.NORMAL if cid in self._chat_states else tk.DISABLED)
+        if self.active_chat_id == cid:
+            return
+        self._open_chat(cid)
 
+    def _open_chat(self, chat_id: int):
+        if chat_id in self._chat_states:
+            self._activate_chat(chat_id)
+            return
+        self._ensure_docker_running()
         proj_row = self.storage.get_project(self.project_id)
         if not proj_row:
             return
-
-        project = Project.from_path(
-            proj_row["name"],
-            proj_row["path"],
-            proj_row.get("original_path"),
-        )
+        project = Project.from_path(proj_row["name"], proj_row["path"], proj_row.get("original_path"))
         stored_msgs = self.storage.get_messages(chat_id)
-
-        def _init_docker():
-            tc = self.theta_code
-            if tc is None:
-                try:
-                    tc = ThetaCode()
-                    tc.set_project(project)
-                    self.theta_code = tc
-                except Exception as exc:
-                    self._docker_label.configure(text=f"Docker init error: {exc}")
+        frame, text_widget = self._create_chat_widget()
+        state = _ChatState(chat_id, frame, text_widget)
+        self._chat_states[chat_id] = state
+        self._activate_chat(chat_id)
+        captured_project_id = self.project_id
+        def _init_chat():
+            while True:
+                if self.project_id != captured_project_id or chat_id not in self._chat_states:
                     return
-
-            if not tc._running:
-                try:
-                    self._docker_label.configure(text="Building / starting Docker…")
-                    tc.start_docker(recreate_venvs=False)
-                except Exception as exc:
-                    self._docker_label.configure(text=f"Docker start error: {exc}")
-                    return
-
-            # Only proceed if this chat is still active
-            if self.chat_id != chat_id:
+                tc = self.theta_code
+                if tc and tc._running:
+                    break
+                time.sleep(0.2)
+            if self.project_id != captured_project_id or chat_id not in self._chat_states:
                 return
-
-            chat_obj = Chat(project, tc)
+            chat_obj = Chat(project, self.theta_code)
             chat_obj.restore_messages(stored_msgs)
-            self.chat = chat_obj
-
-            self._cost_label.configure(text=f"Cost: ${chat_obj.get_cost():.4f}")
-            self._docker_label.configure(text="Docker ready ✓")
-
-            # Show stored messages in UI via main thread
-            def _show_messages():
-                self._clear_messages()
+            cs = self._chat_states[chat_id]
+            cs.chat = chat_obj
+            cs.cost = chat_obj.get_cost()
+            def _show():
+                if chat_id not in self._chat_states:
+                    return
+                cs = self._chat_states[chat_id]
+                self._clear_messages(cs)
                 for msg in stored_msgs:
                     if msg["role"] == "system":
                         continue
                     self._add_message_bubble({
-                        "role": msg["role"],
-                        "content": msg["content"],
-                        "thinking": msg.get("thinking", ""),
-                        "cost": msg.get("cost", 0.0),
+                        "role": msg["role"], "content": msg["content"],
+                        "thinking": msg.get("thinking", ""), "cost": msg.get("cost", 0.0),
                         "llm": msg.get("llm_model", ""),
-                    })
-                self._enable_input()
+                    }, chat_state=cs)
+                if self.active_chat_id == chat_id:
+                    self._sync_input_for_active_chat()
+            self.root.after(0, _show)
+        threading.Thread(target=_init_chat, daemon=True).start()
 
-            self.root.after(0, _show_messages)
+    def _activate_chat(self, chat_id: int):
+        if self.active_chat_id == chat_id:
+            return
+        if self.active_chat_id is not None:
+            old = self._chat_states.get(self.active_chat_id)
+            if old:
+                if old.is_thinking:
+                    old.frame.pack_forget()
+                else:
+                    self._close_chat(old.chat_id)
+        state = self._chat_states[chat_id]
+        state.frame.pack(fill=tk.BOTH, expand=True)
+        self.active_chat_id = chat_id
+        self._sync_input_for_active_chat()
+        self._refresh_chats()
+        if (state.is_thinking or not state.stream_queue.empty()) and not state._poll_running:
+            self._poll_stream_queue(chat_id)
 
-        threading.Thread(target=_init_docker, daemon=True).start()
+    def _close_chat(self, chat_id: int):
+        state = self._chat_states.pop(chat_id, None)
+        if not state:
+            return
+        if state.cancel_event:
+            state.cancel_event.set()
+        state.frame.destroy()
+        if self.active_chat_id == chat_id:
+            self.active_chat_id = None
+            self._sync_input_for_active_chat()
 
+    def _on_close_chat(self):
+        chat_data = self._get_selected_listbox_data(self._chats_list)
+        if not chat_data:
+            return
+        cid = chat_data["id"]
+        if cid in self._chat_states:
+            self._close_chat(cid)
+        self._refresh_chats()
+
+    def _sync_input_for_active_chat(self):
+        state = self._get_active_chat_state()
+        if not state:
+            self._disable_input()
+            self._hide_thinking_indicator()
+            self._cost_label.configure(text="Cost: $0.0000")
+            return
+        self._cost_label.configure(text=f"Cost: ${state.cost:.4f}")
+        if self.theta_code and self.theta_code._running:
+            self._docker_label.configure(text="Docker ready ✓")
+        elif self._docker_starting:
+            self._docker_label.configure(text="Building / starting Docker…")
+        else:
+            self._docker_label.configure(text="")
+        if state.is_thinking:
+            self._show_thinking_indicator()
+            self._disable_input()
+        elif state.chat is None:
+            self._hide_thinking_indicator()
+            self._disable_input()
+        else:
+            self._hide_thinking_indicator()
+            self._enable_input()
+
+    def _ensure_docker_running(self):
+        pid = self.project_id
+        if pid is None:
+            return
+        if self.theta_code is not None and self.theta_code._running:
+            return
+        if self._docker_starting:
+            return
+        proj_row = self.storage.get_project(pid)
+        if not proj_row:
+            return
+        project = Project.from_path(proj_row["name"], proj_row["path"], proj_row.get("original_path"))
+        def _docker_worker():
+            try:
+                if self.project_id != pid:
+                    return
+                tc = self.theta_code
+                if tc is None:
+                    tc = ThetaCode()
+                    tc.set_project(project)
+                    self.theta_code = tc
+                if not tc._running:
+                    self.root.after(0, lambda: self._docker_label.configure(text="Building / starting Docker…"))
+                    tc.start_docker(recreate_venvs=False)
+                    self.root.after(0, lambda: self._docker_label.configure(text="Docker ready ✓"))
+            except Exception as exc:
+                self.root.after(0, lambda e=str(exc): self._docker_label.configure(text=f"Docker error: {e}"))
+            finally:
+                self._docker_starting = False
+        self._docker_starting = True
+        threading.Thread(target=_docker_worker, daemon=True).start()
+
+    # -----------------------------------------------------------------------
+    # Merge dialog
+    # -----------------------------------------------------------------------
     def _open_merge_dialog(self):
         if self.project_id is None:
             return
@@ -1054,12 +941,10 @@ class ThetaCodeApp:
         if not working.exists() or not original.exists():
             messagebox.showerror("Merge error", "Working or original path missing.", parent=self.root)
             return
-
         changes = detect_changes(working, original)
         if not changes:
             messagebox.showinfo("Merge", "No changes to merge.", parent=self.root)
             return
-
         dialog = tk.Toplevel(self.root)
         dialog.title("Merge Project")
         dialog.configure(bg=BG_DARK)
@@ -1067,34 +952,22 @@ class ThetaCodeApp:
         dialog.minsize(600, 400)
         dialog.transient(self.root)
         dialog.grab_set()
-
-        # Center
-        dialog.geometry("+%d+%d" % (
-            self.root.winfo_rootx() + self.root.winfo_width() // 2 - 450,
-            self.root.winfo_rooty() + self.root.winfo_height() // 2 - 325,
-        ))
-
-        # Toolbar
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + self.root.winfo_width() // 2 - 450, self.root.winfo_rooty() + self.root.winfo_height() // 2 - 325))
         toolbar = tk.Frame(dialog, bg=BG_SURFACE, padx=12, pady=8)
         toolbar.pack(fill=tk.X)
-
         def _gitignore_filter():
             matcher = GitignoreMatcher(original)
             for ch in changes:
                 if matcher.is_ignored(ch.relative, is_dir=(ch.working_path and ch.working_path.is_dir())):
                     return True
             return False
-
         has_gitignored = _gitignore_filter()
-
         def select_all():
             for cb in checkboxes:
                 cb[0].set(True)
-
         def select_none():
             for cb in checkboxes:
                 cb[0].set(False)
-
         def skip_gitignored():
             matcher = GitignoreMatcher(original)
             for cb in checkboxes:
@@ -1102,27 +975,14 @@ class ThetaCodeApp:
                 is_dir = bool(change.working_path and change.working_path.is_dir())
                 if matcher.is_ignored(change.relative, is_dir=is_dir):
                     cb[0].set(False)
-
-        tk.Button(toolbar, text="Select All", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
-                  relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10),
-                  activebackground="#3d3d3d", command=select_all).pack(side=tk.LEFT, padx=(0, 8))
-        tk.Button(toolbar, text="Select None", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
-                  relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10),
-                  activebackground="#3d3d3d", command=select_none).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(toolbar, text="Select All", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10), activebackground="#3d3d3d", command=select_all).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(toolbar, text="Select None", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10), activebackground="#3d3d3d", command=select_none).pack(side=tk.LEFT, padx=(0, 8))
         if has_gitignored:
-            tk.Button(toolbar, text="Skip Gitignored", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
-                      relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10),
-                      activebackground="#3d3d3d", command=skip_gitignored).pack(side=tk.LEFT, padx=(0, 8))
-
-        # Split: list left, diff right
-        paned = tk.PanedWindow(dialog, orient=tk.HORIZONTAL, bg="#3d3d3d",
-                               sashwidth=1, sashrelief=tk.FLAT)
+            tk.Button(toolbar, text="Skip Gitignored", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10), activebackground="#3d3d3d", command=skip_gitignored).pack(side=tk.LEFT, padx=(0, 8))
+        paned = tk.PanedWindow(dialog, orient=tk.HORIZONTAL, bg="#3d3d3d", sashwidth=1, sashrelief=tk.FLAT)
         paned.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
-
-        # Left: scrollable checkboxes
         left_frame = tk.Frame(paned, bg=BG_SURFACE)
         paned.add(left_frame, minsize=250, width=400)
-
         canvas = tk.Canvas(left_frame, bg=BG_SURFACE, highlightthickness=0)
         vsb = tk.Scrollbar(left_frame, orient=tk.VERTICAL, command=canvas.yview, bg=BG_SURFACE_CONTAINER)
         scroll_frame = tk.Frame(canvas, bg=BG_SURFACE)
@@ -1130,48 +990,31 @@ class ThetaCodeApp:
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         canvas_window = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
-
         def _on_canvas_configure(event):
             canvas.itemconfig(canvas_window, width=event.width)
         canvas.bind("<Configure>", _on_canvas_configure)
-
         checkboxes: list[tuple[tk.BooleanVar, t.Any]] = []
         type_colors = {"new": "#5c8a5c", "modified": "#8a8a5c", "deleted": "#8a5c5c"}
-
         for change in changes:
             row = tk.Frame(scroll_frame, bg=BG_SURFACE, padx=4, pady=2)
             row.pack(fill=tk.X)
             var = tk.BooleanVar(value=True)
-            cb = tk.Checkbutton(row, variable=var, bg=BG_SURFACE,
-                                activebackground=BG_SURFACE, selectcolor=ACCENT_BLUE)
+            cb = tk.Checkbutton(row, variable=var, bg=BG_SURFACE, activebackground=BG_SURFACE, selectcolor=ACCENT_BLUE)
             cb.pack(side=tk.LEFT)
-            label = tk.Label(row,
-                             text=f"[{change.change_type.upper()}]  {change.relative}",
-                             bg=BG_SURFACE,
-                             fg=type_colors.get(change.change_type, FG_PRIMARY),
-                             font=("TkDefaultFont", 10), anchor="w")
-            label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            tk.Label(row, text=f"[{change.change_type.upper()}]  {change.relative}", bg=BG_SURFACE, fg=type_colors.get(change.change_type, FG_PRIMARY), font=("TkDefaultFont", 10), anchor="w").pack(side=tk.LEFT, fill=tk.X, expand=True)
             checkboxes.append((var, change))
-
         def _on_frame_configure(event=None):
             canvas.configure(scrollregion=canvas.bbox("all"))
         scroll_frame.bind("<Configure>", _on_frame_configure)
-
-        # Right: diff preview
         right_frame = tk.Frame(paned, bg=BG_SURFACE)
         paned.add(right_frame, minsize=250)
-
-        tk.Label(right_frame, text="Diff Preview", bg=BG_SURFACE, fg=FG_VARIANT,
-                 font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill=tk.X, padx=8, pady=(8, 4))
-        diff_text = tk.Text(right_frame, bg=BG_SURFACE_LOW, fg=FG_PRIMARY,
-                            wrap=tk.WORD, state=tk.DISABLED, relief=tk.FLAT,
-                            bd=0, font=("TkDefaultFont", 10), padx=8, pady=8)
+        tk.Label(right_frame, text="Diff Preview", bg=BG_SURFACE, fg=FG_VARIANT, font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill=tk.X, padx=8, pady=(8, 4))
+        diff_text = tk.Text(right_frame, bg=BG_SURFACE_LOW, fg=FG_PRIMARY, wrap=tk.WORD, state=tk.DISABLED, relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10), padx=8, pady=8)
         diff_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         diff_text.tag_configure("diff_add", foreground="#7cff7c")
         diff_text.tag_configure("diff_rem", foreground="#ff7c7c")
         diff_text.tag_configure("diff_hunk", foreground=FG_VARIANT)
         diff_text.tag_configure("diff_file", foreground=ACCENT_BLUE)
-
         def _show_diff_for(change):
             diff_text.configure(state=tk.NORMAL)
             diff_text.delete("1.0", tk.END)
@@ -1213,22 +1056,16 @@ class ThetaCodeApp:
                     except Exception:
                         diff_text.insert(tk.END, "[Binary or unreadable file]\n", "diff_hunk")
             diff_text.configure(state=tk.DISABLED)
-
-        # Bind click on labels to show diff
         for var, change in checkboxes:
             for widget in scroll_frame.winfo_children():
                 if isinstance(widget, tk.Frame):
                     for child in widget.winfo_children():
                         if isinstance(child, tk.Label) and change.relative in child.cget("text"):
                             child.bind("<Button-1>", lambda e, c=change: _show_diff_for(c))
-
         if checkboxes:
             _show_diff_for(checkboxes[0][1])
-
-        # Bottom buttons
         btn_frame = tk.Frame(dialog, bg=BG_DARK, padx=12, pady=8)
         btn_frame.pack(fill=tk.X)
-
         def do_merge():
             selected = {cb[1].relative for cb in checkboxes if cb[0].get()}
             if not selected:
@@ -1241,74 +1078,44 @@ class ThetaCodeApp:
                 return
             dialog.destroy()
             messagebox.showinfo("Merge", f"Merged {len(selected)} change(s) successfully.", parent=self.root)
-
-        tk.Button(btn_frame, text="Cancel", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
-                  relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10),
-                  activebackground="#3d3d3d", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
-        tk.Button(btn_frame, text="Merge Selected", bg=ACCENT_BLUE, fg="#ffffff",
-                  relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10, "bold"),
-                  activebackground="#5ab8ff", command=do_merge).pack(side=tk.RIGHT)
+        tk.Button(btn_frame, text="Cancel", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10), activebackground="#3d3d3d", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(btn_frame, text="Merge Selected", bg=ACCENT_BLUE, fg="#ffffff", relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10, "bold"), activebackground="#5ab8ff", command=do_merge).pack(side=tk.RIGHT)
 
     def _confirm_delete_chat(self):
-        if self.chat_id is None:
-            return
         chat_data = self._get_selected_listbox_data(self._chats_list)
-        name = chat_data["name"] if chat_data else "this chat"
-
-        if messagebox.askyesno(
-            "Delete chat?",
-            f"Delete '{name}'?\n\nAll messages in this chat will be permanently deleted.",
-            parent=self.root,
-            icon="warning",
-        ):
-            cid = self.chat_id
-            if self.chat_id == cid:
-                self.chat_id = None
-                self.chat = None
-                self._clear_messages()
-                self._disable_input()
-                self._cost_label.configure(text="Cost: $0.0000")
-                self._docker_label.configure(text="")
+        if not chat_data:
+            return
+        name = chat_data["name"]
+        cid = chat_data["id"]
+        if messagebox.askyesno("Delete chat?", f"Delete '{name}'?\n\nAll messages in this chat will be permanently deleted.", parent=self.root, icon="warning"):
+            if cid in self._chat_states:
+                self._close_chat(cid)
             self.storage.delete_chat(cid)
             self._refresh_chats()
             self._delete_chat_btn.configure(state=tk.DISABLED)
+            self._copy_json_btn.configure(state=tk.DISABLED)
+            self._close_chat_btn.configure(state=tk.DISABLED)
 
     def _open_new_chat_dialog(self):
         if self.project_id is None:
-            messagebox.showinfo(
-                "No project selected",
-                "Please select or create a project first.",
-                parent=self.root,
-            )
+            messagebox.showinfo("No project selected", "Please select or create a project first.", parent=self.root)
             return
-
         dialog = tk.Toplevel(self.root)
         dialog.title("New Chat")
         dialog.configure(bg=BG_SURFACE_CONTAINER)
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
-
-        dialog.geometry("+%d+%d" % (
-            self.root.winfo_rootx() + self.root.winfo_width() // 2 - 150,
-            self.root.winfo_rooty() + self.root.winfo_height() // 2 - 60,
-        ))
-
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + self.root.winfo_width() // 2 - 150, self.root.winfo_rooty() + self.root.winfo_height() // 2 - 60))
         frame = tk.Frame(dialog, bg=BG_SURFACE_CONTAINER, padx=20, pady=20)
         frame.pack()
-
-        tk.Label(frame, text="Chat Name", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
-                 font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill=tk.X)
+        tk.Label(frame, text="Chat Name", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY, font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill=tk.X)
         name_var = tk.StringVar()
-        name_entry = tk.Entry(frame, textvariable=name_var, bg=BG_SURFACE, fg=FG_PRIMARY,
-                              relief=tk.FLAT, bd=0, insertbackground=FG_PRIMARY,
-                              font=("TkDefaultFont", 11), width=30)
+        name_entry = tk.Entry(frame, textvariable=name_var, bg=BG_SURFACE, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, insertbackground=FG_PRIMARY, font=("TkDefaultFont", 11), width=30)
         name_entry.pack(fill=tk.X, pady=(4, 16))
         name_entry.focus_set()
-
         btn_frame = tk.Frame(frame, bg=BG_SURFACE_CONTAINER)
         btn_frame.pack(fill=tk.X)
-
         def create():
             name = name_var.get().strip()
             if not name:
@@ -1317,16 +1124,8 @@ class ThetaCodeApp:
             dialog.destroy()
             self._refresh_chats()
             self._select_chat_by_id(cid)
-
-        tk.Button(btn_frame, text="Cancel", bg=BG_SURFACE, fg=FG_PRIMARY,
-                  relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10),
-                  activebackground="#3d3d3d", activeforeground=FG_PRIMARY,
-                  command=dialog.destroy, cursor="hand2").pack(side=tk.RIGHT, padx=(8, 0))
-        tk.Button(btn_frame, text="Create", bg=ACCENT_BLUE, fg="#ffffff",
-                  relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10, "bold"),
-                  activebackground="#5ab8ff", activeforeground="#ffffff",
-                  command=create, cursor="hand2").pack(side=tk.RIGHT)
-
+        tk.Button(btn_frame, text="Cancel", bg=BG_SURFACE, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10), activebackground="#3d3d3d", activeforeground=FG_PRIMARY, command=dialog.destroy, cursor="hand2").pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(btn_frame, text="Create", bg=ACCENT_BLUE, fg="#ffffff", relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10, "bold"), activebackground="#5ab8ff", activeforeground="#ffffff", command=create, cursor="hand2").pack(side=tk.RIGHT)
         dialog.bind("<Return>", lambda e: create())
 
     def _select_chat_by_id(self, cid: int):
@@ -1340,18 +1139,15 @@ class ThetaCodeApp:
                 break
 
     # -----------------------------------------------------------------------
-    # Send message
+    # Input / send / cancel
     # -----------------------------------------------------------------------
     def _on_input_return(self, event=None):
-        """Enter key pressed: send message (unless Shift is held)."""
-        # Check if Shift is also pressed (handled separately)
-        if (event.state & 0x1):  # Shift mask
-            return  # Let _on_input_shift_return handle it
+        if event.state & 0x1:
+            return
         self._do_send()
-        return "break"  # Prevent default newline
+        return "break"
 
     def _on_input_shift_return(self, event=None):
-        """Shift+Enter: insert newline."""
         self._input_text.insert(tk.INSERT, "\n")
         return "break"
 
@@ -1368,250 +1164,10 @@ class ThetaCodeApp:
         self._cancel_btn.pack_forget()
         self._cancel_btn.configure(state=tk.DISABLED)
 
-    def _clear_messages(self):
-        self._messages_text.configure(state=tk.NORMAL)
-        self._messages_text.delete("1.0", tk.END)
-        self._messages_text.configure(state=tk.DISABLED)
-        self._thinking_blocks.clear()
-
-    def _do_cancel(self):
-        """Cancel the current streaming request."""
-        if not self.is_thinking:
-            return
-        evt = self._cancel_event
-        if evt:
-            evt.set()
-        self._cancel_btn.configure(state=tk.DISABLED)
-        self._thinking_label.configure(text="Cancelling…")
-
-    def _do_send(self):
-        text = self._input_text.get("1.0", tk.END).strip()
-        if not text or self.is_thinking or not self.chat:
-            return
-
-        self._input_text.delete("1.0", tk.END)
-        self._disable_input()
-        self.is_thinking = True
-        self._cancel_event = threading.Event()  # fresh cancel event per send
-        self._show_thinking_indicator()
-
-        chat_obj = self.chat
-        llm_str = (self._model_var.get() or DEFAULT_MODEL).strip()
-
-        try:
-            llm = get_llm(llm_str)
-        except ValueError as exc:
-            self._add_message_bubble({
-                "role": "assistant",
-                "content": f"[Configuration error] {exc}\n\nPlease set a valid model name above.",
-                "thinking": "",
-                "cost": 0.0,
-            })
-            self.is_thinking = False
-            self._cancel_event = None
-            self._hide_thinking_indicator()
-            self._enable_input()
-            return
-
-        # Show and persist the user's message bubble NOW (main thread),
-        # before inserting the AI placeholder, so the display order is correct.
-        user_msg = {
-            "role": "user",
-            "content": f"<user_message>\n{text}\n</user_message>",
-        }
-        self._persist_and_show(user_msg)
-
-        # Insert streaming placeholder AFTER the user bubble is already visible.
-        self._current_stream_placeholder = self._insert_streaming_placeholder()
-
-        assistant_final = [None]  # mutable container for closure  [Cancelled]
-
-        def on_token(content: str):
-            self._stream_queue.put(("token", content))
-
-        def on_new_msg(msg: dict):
-            role = msg.get("role", "")
-            if role == "assistant":
-                content = msg.get("content", "")
-                # If the assistant used a tool, finalize this bubble
-                # and start a fresh placeholder for the next turn.
-                if "<tool_call>" in content and "</tool_call>" in content:
-                    self._stream_queue.put(("assistant_tool", msg))
-                else:
-                    assistant_final[0] = msg
-                return
-            # Skip the initial user message — it was already displayed and
-            # persisted above, before the streaming placeholder was inserted.
-            if msg.get("content", "").lstrip().startswith("<user_message>"):
-                return
-            self._stream_queue.put(("message", msg))
-
-        cancel_event = self._cancel_event  # capture for closure
-
-        def _stream_worker():
-            try:
-                result = chat_obj.send_message_stream(
-                    text, llm,
-                    on_token=on_token,
-                    on_new_message=on_new_msg,
-                    cancel_event=cancel_event,
-                )
-            except Exception as exc:
-                self._stream_queue.put(("error", str(exc)))
-            else:
-                if cancel_event and cancel_event.is_set():
-                    self._stream_queue.put(("cancelled", assistant_final[0]))
-                else:
-                    self._stream_queue.put(("done", assistant_final[0]))
-
-        threading.Thread(target=_stream_worker, daemon=True).start()
-
-        # Start polling the queue
-        self._poll_stream_queue()
-
-    def _poll_stream_queue(self):
-        """Poll the stream queue and update UI on the main thread."""
-        try:
-            while True:
-                item = self._stream_queue.get_nowait()
-                action = item[0]
-
-                if action == "token":
-                    _, token = item
-                    ph = getattr(self, "_current_stream_placeholder", None)
-                    if ph is None:
-                        # Lazily create the placeholder so that any tool-result
-                        # bubbles queued before this token are drawn first.
-                        self._current_stream_placeholder = self._insert_streaming_placeholder()
-                        ph = self._current_stream_placeholder
-                    self._append_streaming_token(ph, token)
-
-                elif action == "message":
-                    _, msg = item
-                    self._persist_and_show(msg)
-
-                elif action == "assistant_tool":
-                    _, msg = item
-                    # Persist the tool-call assistant message so it survives a restart
-                    chat_id = self.chat_id
-                    if chat_id:
-                        self.storage.append_message(
-                            chat_id=chat_id,
-                            role="assistant",
-                            content=msg.get("content", ""),
-                            thinking=msg.get("thinking", "") or "",
-                            cost=msg.get("cost", 0.0) or 0.0,
-                            llm_model=msg.get("llm", "") or "",
-                        )
-                    ph = getattr(self, "_current_stream_placeholder", None)
-                    if ph:
-                        self._finalize_streaming_bubble(ph, msg)
-                    # Do NOT create a new placeholder here — defer it until the
-                    # first token of the next AI turn arrives so that any
-                    # tool-result bubble queued after this event is drawn first.
-                    self._current_stream_placeholder = None
-
-                elif action == "error":
-                    _, error = item
-                    ph = getattr(self, "_current_stream_placeholder", None)
-                    if ph:
-                        self._finalize_streaming_bubble(ph, None, error_msg=error)
-                    self.is_thinking = False
-                    self._cancel_event = None
-                    self._hide_thinking_indicator()
-                    self._enable_input()
-
-                elif action == "cancelled":
-                    _, final_msg = item
-                    ph = getattr(self, "_current_stream_placeholder", None)
-                    if ph is None and final_msg is not None:
-                        ph = self._insert_streaming_placeholder()
-                        self._current_stream_placeholder = ph
-                    if ph:
-                        if final_msg is not None:
-                            self._finalize_streaming_bubble(ph, final_msg)
-                            # Persist partial response to storage
-                            chat_id = self.chat_id
-                            if chat_id:
-                                final_content = final_msg.get("content", "")
-                                thinking = final_msg.get("thinking", "") or ""
-                                cost_val = final_msg.get("cost", 0.0) or 0.0
-                                llm_name = final_msg.get("llm", "") or ""
-                                self.storage.append_message(
-                                    chat_id=chat_id,
-                                    role="assistant",
-                                    content=final_content,
-                                    thinking=thinking,
-                                    cost=cost_val,
-                                    llm_model=llm_name,
-                                )
-                        else:
-                            self._finalize_streaming_bubble(ph, None)
-                    self._current_stream_placeholder = None
-
-                    # Update cost
-                    chat_obj = self.chat
-                    if chat_obj:
-                        self._cost_label.configure(text=f"Cost: ${chat_obj.get_cost():.4f}")
-
-                    self.is_thinking = False
-                    self._cancel_event = None
-                    self._hide_thinking_indicator()
-                    self._enable_input()
-
-                elif action == "done":
-                    _, final_msg = item
-                    ph = getattr(self, "_current_stream_placeholder", None)
-                    if ph is None and final_msg is not None:
-                        # Edge case: the LLM returned a final answer without
-                        # streaming any tokens (so no placeholder was created
-                        # lazily).  Create one now so the message is displayed.
-                        ph = self._insert_streaming_placeholder()
-                        self._current_stream_placeholder = ph
-                    if ph:
-                        if final_msg is not None:
-                            self._finalize_streaming_bubble(ph, final_msg)
-                            # Persist to storage
-                            chat_id = self.chat_id
-                            if chat_id:
-                                final_content = final_msg.get("content", "")
-                                thinking = final_msg.get("thinking", "") or ""
-                                cost_val = final_msg.get("cost", 0.0) or 0.0
-                                llm_name = final_msg.get("llm", "") or ""
-                                self.storage.append_message(
-                                    chat_id=chat_id,
-                                    role="assistant",
-                                    content=final_content,
-                                    thinking=thinking,
-                                    cost=cost_val,
-                                    llm_model=llm_name,
-                                )
-                        else:
-                            # No final message — just finalize the placeholder empty
-                            self._finalize_streaming_bubble(ph, None)
-                    self._current_stream_placeholder = None
-
-                    # Update cost
-                    chat_obj = self.chat
-                    if chat_obj:
-                        self._cost_label.configure(text=f"Cost: ${chat_obj.get_cost():.4f}")
-
-                    self.is_thinking = False
-                    self._hide_thinking_indicator()
-                    self._enable_input()
-
-        except queue.Empty:
-            pass
-
-        # Continue polling if still thinking
-        if self.is_thinking:
-            self.root.after(50, self._poll_stream_queue)
-
     def _show_thinking_indicator(self):
         self._thinking_label.configure(text="AI is thinking…")
         self._thinking_progress.pack(side=tk.LEFT, padx=(8, 0))
         self._thinking_progress.start(10)
-        # Show cancel button to the right of the Send button
         self._cancel_btn.configure(state=tk.NORMAL)
         self._cancel_btn.pack(side=tk.RIGHT, padx=(8, 0))
 
@@ -1622,53 +1178,224 @@ class ThetaCodeApp:
         self._cancel_btn.pack_forget()
         self._cancel_btn.configure(state=tk.DISABLED)
 
-    def _persist_and_show(self, msg: dict):
-        """Persist a message to storage and add it to the UI."""
-        chat_id = self.chat_id
+    def _do_cancel(self):
+        state = self._get_active_chat_state()
+        if not state or not state.is_thinking:
+            return
+        evt = state.cancel_event
+        if evt:
+            evt.set()
+        self._cancel_btn.configure(state=tk.DISABLED)
+        self._thinking_label.configure(text="Cancelling…")
+
+    def _do_send(self):
+        text = self._input_text.get("1.0", tk.END).strip()
+        state = self._get_active_chat_state()
+        if not text or not state or state.is_thinking or not state.chat:
+            return
+        self._input_text.delete("1.0", tk.END)
+        self._disable_input()
+        state.is_thinking = True
+        state.cancel_event = threading.Event()
+        state.current_stream_placeholder = None
+        self._show_thinking_indicator()
+
+        chat_obj = state.chat
+        llm_str = (self._model_var.get() or DEFAULT_MODEL).strip()
+        try:
+            llm = get_llm(llm_str)
+        except ValueError as exc:
+            self._add_message_bubble({
+                "role": "assistant", "content": f"[Configuration error] {exc}\n\nPlease set a valid model name above.",
+                "thinking": "", "cost": 0.0,
+            }, chat_state=state)
+            state.is_thinking = False
+            state.cancel_event = None
+            self._hide_thinking_indicator()
+            self._enable_input()
+            return
+
+        user_msg = {"role": "user", "content": f"<user_message>\n{text}\n</user_message>"}
+        self._persist_and_show(user_msg)
+        ph = self._insert_streaming_placeholder(chat_state=state)
+        state.current_stream_placeholder = ph
+        assistant_final = [None]
+        def on_token(content: str):
+            state.stream_queue.put(("token", content))
+        def on_new_msg(msg: dict):
+            role = msg.get("role", "")
+            if role == "assistant":
+                content = msg.get("content", "")
+                if "<tool_call>" in content and "</tool_call>" in content:
+                    state.stream_queue.put(("assistant_tool", msg))
+                else:
+                    assistant_final[0] = msg
+                return
+            if msg.get("content", "").lstrip().startswith("<user_message>"):
+                return
+            state.stream_queue.put(("message", msg))
+        cancel_event = state.cancel_event
+        def _stream_worker():
+            try:
+                result = chat_obj.send_message_stream(
+                    text, llm, on_token=on_token, on_new_message=on_new_msg, cancel_event=cancel_event,
+                )
+            except Exception as exc:
+                state.stream_queue.put(("error", str(exc)))
+            else:
+                if cancel_event and cancel_event.is_set():
+                    state.stream_queue.put(("cancelled", assistant_final[0]))
+                else:
+                    state.stream_queue.put(("done", assistant_final[0]))
+        threading.Thread(target=_stream_worker, daemon=True).start()
+        if not state._poll_running:
+            self._poll_stream_queue(state.chat_id)
+
+    # -----------------------------------------------------------------------
+    # Stream queue polling
+    # -----------------------------------------------------------------------
+    def _poll_stream_queue(self, chat_id: int):
+        state = self._chat_states.get(chat_id)
+        if not state or state._poll_running:
+            return
+        state._poll_running = True
+        try:
+            while True:
+                item = state.stream_queue.get_nowait()
+                action = item[0]
+                if action == "token":
+                    _, token = item
+                    ph = state.current_stream_placeholder
+                    if ph is None:
+                        ph = self._insert_streaming_placeholder(chat_state=state)
+                        state.current_stream_placeholder = ph
+                    self._append_streaming_token(ph, token, chat_state=state)
+                elif action == "message":
+                    _, msg = item
+                    self._persist_and_show(msg, chat_state=state)
+                elif action == "assistant_tool":
+                    _, msg = item
+                    self.storage.append_message(
+                        chat_id=chat_id, role="assistant",
+                        content=msg.get("content", ""), thinking=msg.get("thinking", "") or "",
+                        cost=msg.get("cost", 0.0) or 0.0, llm_model=msg.get("llm", "") or "",
+                    )
+                    ph = state.current_stream_placeholder
+                    if ph:
+                        self._finalize_streaming_bubble(ph, msg, chat_state=state)
+                        self._update_chat_cost(state)
+                    state.current_stream_placeholder = None
+                elif action == "error":
+                    _, error = item
+                    ph = state.current_stream_placeholder
+                    if ph:
+                        self._finalize_streaming_bubble(ph, None, error_msg=error, chat_state=state)
+                    state.is_thinking = False
+                    state.cancel_event = None
+                    state.current_stream_placeholder = None
+                    if self.active_chat_id == chat_id:
+                        self._hide_thinking_indicator()
+                        self._enable_input()
+                        self._update_chat_cost(state)
+                elif action == "cancelled":
+                    _, final_msg = item
+                    ph = state.current_stream_placeholder
+                    if ph is None and final_msg is not None:
+                        ph = self._insert_streaming_placeholder(chat_state=state)
+                        state.current_stream_placeholder = ph
+                    if ph:
+                        if final_msg is not None:
+                            self._finalize_streaming_bubble(ph, final_msg, chat_state=state)
+                            self.storage.append_message(
+                                chat_id=chat_id, role="assistant",
+                                content=final_msg.get("content", ""), thinking=final_msg.get("thinking", "") or "",
+                                cost=final_msg.get("cost", 0.0) or 0.0, llm_model=final_msg.get("llm", "") or "",
+                            )
+                        else:
+                            self._finalize_streaming_bubble(ph, None, chat_state=state)
+                    state.is_thinking = False
+                    state.cancel_event = None
+                    state.current_stream_placeholder = None
+                    if self.active_chat_id == chat_id:
+                        self._hide_thinking_indicator()
+                        self._enable_input()
+                        self._update_chat_cost(state)
+                elif action == "done":
+                    _, final_msg = item
+                    ph = state.current_stream_placeholder
+                    if ph is None and final_msg is not None:
+                        ph = self._insert_streaming_placeholder(chat_state=state)
+                        state.current_stream_placeholder = ph
+                    if ph:
+                        if final_msg is not None:
+                            self._finalize_streaming_bubble(ph, final_msg, chat_state=state)
+                            self.storage.append_message(
+                                chat_id=chat_id, role="assistant",
+                                content=final_msg.get("content", ""), thinking=final_msg.get("thinking", "") or "",
+                                cost=final_msg.get("cost", 0.0) or 0.0, llm_model=final_msg.get("llm", "") or "",
+                            )
+                        else:
+                            self._finalize_streaming_bubble(ph, None, chat_state=state)
+                    state.is_thinking = False
+                    state.cancel_event = None
+                    state.current_stream_placeholder = None
+                    if self.active_chat_id == chat_id:
+                        self._hide_thinking_indicator()
+                        self._enable_input()
+                        self._update_chat_cost(state)
+        except queue.Empty:
+            pass
+        if state.is_thinking:
+            self.root.after(50, lambda _cid=chat_id: self._poll_stream_queue(_cid))
+        else:
+            state._poll_running = False
+
+    def _persist_and_show(self, msg: dict, chat_state: _ChatState | None = None):
+        if chat_state is None:
+            chat_state = self._get_active_chat_state()
+            if not chat_state:
+                return
+        chat_id = chat_state.chat_id
         role = msg.get("role", "")
         if role == "system":
             return
         if chat_id:
             self.storage.append_message(
-                chat_id=chat_id,
-                role=role,
-                content=msg.get("content", ""),
-                thinking=msg.get("thinking", "") or "",
-                cost=msg.get("cost", 0.0) or 0.0,
+                chat_id=chat_id, role=role, content=msg.get("content", ""),
+                thinking=msg.get("thinking", "") or "", cost=msg.get("cost", 0.0) or 0.0,
                 llm_model=msg.get("llm", "") or "",
             )
-        self._add_message_bubble(msg)
-        # Update cost
-        chat_obj = self.chat
+        self._add_message_bubble(msg, chat_state=chat_state)
+        self._update_chat_cost(chat_state)
+
+    def _update_chat_cost(self, chat_state: _ChatState):
+        chat_obj = chat_state.chat
         if chat_obj:
-            self._cost_label.configure(text=f"Cost: ${chat_obj.get_cost():.4f}")
+            chat_state.cost = chat_obj.get_cost()
+        if self.active_chat_id == chat_state.chat_id:
+            self._cost_label.configure(text=f"Cost: ${chat_state.cost:.4f}")
 
     # -----------------------------------------------------------------------
     # Copy chat as JSON
     # -----------------------------------------------------------------------
     def _copy_chat_as_json(self):
-        """Copy the entire conversation as a JSON array to the clipboard."""
-        if self.chat_id is None:
+        chat_data = self._get_selected_listbox_data(self._chats_list)
+        if not chat_data:
             return
-        messages = self.storage.get_messages(self.chat_id)
+        cid = chat_data["id"]
+        messages = self.storage.get_messages(cid)
         json_str = json.dumps(messages, indent=2, ensure_ascii=False)
         self.root.clipboard_clear()
         self.root.clipboard_append(json_str)
-        # Brief confirmation feedback
-        prev_text = self._docker_label.cget("text")
+        prev = self._docker_label.cget("text")
         self._docker_label.configure(text="Copied to clipboard ✓")
-        self.root.after(2000, lambda: self._docker_label.configure(text=prev_text))
+        self.root.after(2000, lambda: self._docker_label.configure(text=prev))
 
-    # -----------------------------------------------------------------------
-    # Run the app
     # -----------------------------------------------------------------------
     def run(self):
         self.root.mainloop()
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 def main():
     app = ThetaCodeApp()
     app.run()
