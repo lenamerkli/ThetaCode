@@ -3,6 +3,7 @@ ThetaCode – tkinter desktop GUI
 Run with:  python src/app.py
 """
 import atexit
+import json
 import os
 import sys
 import queue
@@ -263,6 +264,15 @@ class ThetaCodeApp:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         self._chats_list.bind("<<ListboxSelect>>", self._on_chat_select)
+
+        # Copy JSON button
+        self._copy_json_btn = tk.Button(f, text="Copy as JSON", bg=BG_SURFACE_CONTAINER,
+                                        fg=FG_TERTIARY, relief=tk.FLAT, bd=0,
+                                        activebackground="#2d3d5c", activeforeground=FG_TERTIARY,
+                                        font=("TkDefaultFont", 10), cursor="hand2",
+                                        command=self._copy_chat_as_json,
+                                        state=tk.DISABLED)
+        self._copy_json_btn.pack(fill=tk.X, padx=12, pady=(2, 2))
 
         # Delete button
         self._delete_chat_btn = tk.Button(f, text="Delete Chat", bg=BG_SURFACE_CONTAINER,
@@ -938,6 +948,7 @@ class ThetaCodeApp:
     def _refresh_chats(self):
         self._chats_list.delete(0, tk.END)
         self._delete_chat_btn.configure(state=tk.DISABLED)
+        self._copy_json_btn.configure(state=tk.DISABLED)
         if self.project_id is None:
             return
 
@@ -970,6 +981,7 @@ class ThetaCodeApp:
         self._cost_label.configure(text="Cost: $0.0000")
         self._refresh_chats()
         self._delete_chat_btn.configure(state=tk.NORMAL)
+        self._copy_json_btn.configure(state=tk.NORMAL)
 
         proj_row = self.storage.get_project(self.project_id)
         if not proj_row:
@@ -1630,6 +1642,22 @@ class ThetaCodeApp:
         chat_obj = self.chat
         if chat_obj:
             self._cost_label.configure(text=f"Cost: ${chat_obj.get_cost():.4f}")
+
+    # -----------------------------------------------------------------------
+    # Copy chat as JSON
+    # -----------------------------------------------------------------------
+    def _copy_chat_as_json(self):
+        """Copy the entire conversation as a JSON array to the clipboard."""
+        if self.chat_id is None:
+            return
+        messages = self.storage.get_messages(self.chat_id)
+        json_str = json.dumps(messages, indent=2, ensure_ascii=False)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(json_str)
+        # Brief confirmation feedback
+        prev_text = self._docker_label.cget("text")
+        self._docker_label.configure(text="Copied to clipboard ✓")
+        self.root.after(2000, lambda: self._docker_label.configure(text=prev_text))
 
     # -----------------------------------------------------------------------
     # Run the app
