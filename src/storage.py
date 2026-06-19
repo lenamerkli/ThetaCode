@@ -56,6 +56,7 @@ class Storage:
                 conn.execute("SELECT original_path FROM projects LIMIT 1")
             except sqlite3.OperationalError:
                 conn.execute("ALTER TABLE projects ADD COLUMN original_path TEXT")
+            conn.commit()
 
         self._migrate_projects_to_working_copy()
 
@@ -70,6 +71,7 @@ class Storage:
                     "UPDATE projects SET original_path = ? WHERE id = ?",
                     (row["path"], row["id"]),
                 )
+            conn.commit()
 
     def get_project_original_path(self, project_id: int) -> str | None:
         with self._connect() as conn:
@@ -84,6 +86,7 @@ class Storage:
                 "UPDATE projects SET path = ?, original_path = ? WHERE id = ?",
                 (working_path, original_path, project_id),
             )
+            conn.commit()
 
 
 
@@ -98,6 +101,7 @@ class Storage:
                 "INSERT INTO projects (name, path, created_at) VALUES (?, ?, ?)",
                 (name, path, time.time()),
             )
+            conn.commit()
             return cur.lastrowid
 
     def get_projects(self) -> list[dict]:
@@ -120,6 +124,7 @@ class Storage:
         """Delete a project (cascades to chats and messages)."""
         with self._connect() as conn:
             conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            conn.commit()
 
     def update_project_path(self, project_id: int, new_path: str):
         with self._connect() as conn:
@@ -127,6 +132,7 @@ class Storage:
                 "UPDATE projects SET path = ? WHERE id = ?",
                 (new_path, project_id),
             )
+            conn.commit()
 
     # ------------------------------------------------------------------
     # Chats
@@ -139,6 +145,7 @@ class Storage:
                 "INSERT INTO chats (project_id, name, created_at) VALUES (?, ?, ?)",
                 (project_id, name, time.time()),
             )
+            conn.commit()
             return cur.lastrowid
 
     def get_chats(self, project_id: int) -> list[dict]:
@@ -155,6 +162,7 @@ class Storage:
         """Delete a chat (cascades to messages)."""
         with self._connect() as conn:
             conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+            conn.commit()
 
     def rename_chat(self, chat_id: int, new_name: str):
         with self._connect() as conn:
@@ -162,6 +170,7 @@ class Storage:
                 "UPDATE chats SET name = ? WHERE id = ?",
                 (new_name, chat_id),
             )
+            conn.commit()
 
     # ------------------------------------------------------------------
     # Messages
@@ -183,6 +192,7 @@ class Storage:
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (chat_id, role, content, thinking, cost, llm_model, time.time()),
             )
+            conn.commit()
             return cur.lastrowid
 
     def get_messages(self, chat_id: int) -> list[dict]:
@@ -198,3 +208,4 @@ class Storage:
     def delete_message(self, message_id: int):
         with self._connect() as conn:
             conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+            conn.commit()

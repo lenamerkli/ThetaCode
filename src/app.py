@@ -1161,8 +1161,6 @@ class ThetaCodeApp:
     def _disable_input(self):
         self._input_text.configure(state=tk.DISABLED)
         self._send_btn.configure(state=tk.DISABLED)
-        self._cancel_btn.pack_forget()
-        self._cancel_btn.configure(state=tk.DISABLED)
 
     def _show_thinking_indicator(self):
         self._thinking_label.configure(text="AI is thinking…")
@@ -1261,94 +1259,99 @@ class ThetaCodeApp:
         state._poll_running = True
         try:
             while True:
-                item = state.stream_queue.get_nowait()
-                action = item[0]
-                if action == "token":
-                    _, token = item
-                    ph = state.current_stream_placeholder
-                    if ph is None:
-                        ph = self._insert_streaming_placeholder(chat_state=state)
-                        state.current_stream_placeholder = ph
-                    self._append_streaming_token(ph, token, chat_state=state)
-                elif action == "message":
-                    _, msg = item
-                    self._persist_and_show(msg, chat_state=state)
-                elif action == "assistant_tool":
-                    _, msg = item
-                    self.storage.append_message(
-                        chat_id=chat_id, role="assistant",
-                        content=msg.get("content", ""), thinking=msg.get("thinking", "") or "",
-                        cost=msg.get("cost", 0.0) or 0.0, llm_model=msg.get("llm", "") or "",
-                    )
-                    ph = state.current_stream_placeholder
-                    if ph:
-                        self._finalize_streaming_bubble(ph, msg, chat_state=state)
-                        self._update_chat_cost(state)
-                    state.current_stream_placeholder = None
-                elif action == "error":
-                    _, error = item
-                    ph = state.current_stream_placeholder
-                    if ph:
-                        self._finalize_streaming_bubble(ph, None, error_msg=error, chat_state=state)
-                    state.is_thinking = False
-                    state.cancel_event = None
-                    state.current_stream_placeholder = None
-                    if self.active_chat_id == chat_id:
-                        self._hide_thinking_indicator()
-                        self._enable_input()
-                        self._update_chat_cost(state)
-                elif action == "cancelled":
-                    _, final_msg = item
-                    ph = state.current_stream_placeholder
-                    if ph is None and final_msg is not None:
-                        ph = self._insert_streaming_placeholder(chat_state=state)
-                        state.current_stream_placeholder = ph
-                    if ph:
-                        if final_msg is not None:
-                            self._finalize_streaming_bubble(ph, final_msg, chat_state=state)
-                            self.storage.append_message(
-                                chat_id=chat_id, role="assistant",
-                                content=final_msg.get("content", ""), thinking=final_msg.get("thinking", "") or "",
-                                cost=final_msg.get("cost", 0.0) or 0.0, llm_model=final_msg.get("llm", "") or "",
-                            )
-                        else:
-                            self._finalize_streaming_bubble(ph, None, chat_state=state)
-                    state.is_thinking = False
-                    state.cancel_event = None
-                    state.current_stream_placeholder = None
-                    if self.active_chat_id == chat_id:
-                        self._hide_thinking_indicator()
-                        self._enable_input()
-                        self._update_chat_cost(state)
-                elif action == "done":
-                    _, final_msg = item
-                    ph = state.current_stream_placeholder
-                    if ph is None and final_msg is not None:
-                        ph = self._insert_streaming_placeholder(chat_state=state)
-                        state.current_stream_placeholder = ph
-                    if ph:
-                        if final_msg is not None:
-                            self._finalize_streaming_bubble(ph, final_msg, chat_state=state)
-                            self.storage.append_message(
-                                chat_id=chat_id, role="assistant",
-                                content=final_msg.get("content", ""), thinking=final_msg.get("thinking", "") or "",
-                                cost=final_msg.get("cost", 0.0) or 0.0, llm_model=final_msg.get("llm", "") or "",
-                            )
-                        else:
-                            self._finalize_streaming_bubble(ph, None, chat_state=state)
-                    state.is_thinking = False
-                    state.cancel_event = None
-                    state.current_stream_placeholder = None
-                    if self.active_chat_id == chat_id:
-                        self._hide_thinking_indicator()
-                        self._enable_input()
-                        self._update_chat_cost(state)
-        except queue.Empty:
-            pass
+                try:
+                    item = state.stream_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    action = item[0]
+                    if action == "token":
+                        _, token = item
+                        ph = state.current_stream_placeholder
+                        if ph is None:
+                            ph = self._insert_streaming_placeholder(chat_state=state)
+                            state.current_stream_placeholder = ph
+                        self._append_streaming_token(ph, token, chat_state=state)
+                    elif action == "message":
+                        _, msg = item
+                        self._persist_and_show(msg, chat_state=state)
+                    elif action == "assistant_tool":
+                        _, msg = item
+                        self.storage.append_message(
+                            chat_id=chat_id, role="assistant",
+                            content=msg.get("content", ""), thinking=msg.get("thinking", "") or "",
+                            cost=msg.get("cost", 0.0) or 0.0, llm_model=msg.get("llm", "") or "",
+                        )
+                        ph = state.current_stream_placeholder
+                        if ph:
+                            self._finalize_streaming_bubble(ph, msg, chat_state=state)
+                            self._update_chat_cost(state)
+                        state.current_stream_placeholder = None
+                    elif action == "error":
+                        _, error = item
+                        ph = state.current_stream_placeholder
+                        if ph:
+                            self._finalize_streaming_bubble(ph, None, error_msg=error, chat_state=state)
+                        state.is_thinking = False
+                        state.cancel_event = None
+                        state.current_stream_placeholder = None
+                        if self.active_chat_id == chat_id:
+                            self._hide_thinking_indicator()
+                            self._enable_input()
+                            self._update_chat_cost(state)
+                    elif action == "cancelled":
+                        _, final_msg = item
+                        ph = state.current_stream_placeholder
+                        if ph is None and final_msg is not None:
+                            ph = self._insert_streaming_placeholder(chat_state=state)
+                            state.current_stream_placeholder = ph
+                        if ph:
+                            if final_msg is not None:
+                                self._finalize_streaming_bubble(ph, final_msg, chat_state=state)
+                                self.storage.append_message(
+                                    chat_id=chat_id, role="assistant",
+                                    content=final_msg.get("content", ""), thinking=final_msg.get("thinking", "") or "",
+                                    cost=final_msg.get("cost", 0.0) or 0.0, llm_model=final_msg.get("llm", "") or "",
+                                )
+                            else:
+                                self._finalize_streaming_bubble(ph, None, chat_state=state)
+                        state.is_thinking = False
+                        state.cancel_event = None
+                        state.current_stream_placeholder = None
+                        if self.active_chat_id == chat_id:
+                            self._hide_thinking_indicator()
+                            self._enable_input()
+                            self._update_chat_cost(state)
+                    elif action == "done":
+                        _, final_msg = item
+                        ph = state.current_stream_placeholder
+                        if ph is None and final_msg is not None:
+                            ph = self._insert_streaming_placeholder(chat_state=state)
+                            state.current_stream_placeholder = ph
+                        if ph:
+                            if final_msg is not None:
+                                self._finalize_streaming_bubble(ph, final_msg, chat_state=state)
+                                self.storage.append_message(
+                                    chat_id=chat_id, role="assistant",
+                                    content=final_msg.get("content", ""), thinking=final_msg.get("thinking", "") or "",
+                                    cost=final_msg.get("cost", 0.0) or 0.0, llm_model=final_msg.get("llm", "") or "",
+                                )
+                            else:
+                                self._finalize_streaming_bubble(ph, None, chat_state=state)
+                        state.is_thinking = False
+                        state.cancel_event = None
+                        state.current_stream_placeholder = None
+                        if self.active_chat_id == chat_id:
+                            self._hide_thinking_indicator()
+                            self._enable_input()
+                            self._update_chat_cost(state)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+        finally:
+            state._poll_running = False
         if state.is_thinking:
             self.root.after(50, lambda _cid=chat_id: self._poll_stream_queue(_cid))
-        else:
-            state._poll_running = False
 
     def _persist_and_show(self, msg: dict, chat_state: _ChatState | None = None):
         if chat_state is None:
