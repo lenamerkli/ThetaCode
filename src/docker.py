@@ -9,6 +9,9 @@ IMAGE_NAME = 'thetacode_debian_13'
 CONTAINER_NAME = 'thetacode'
 INTERNAL_PORT = 50000
 
+NETWORK_NAME = 'thetacode_net'
+CONTAINER_IP = '172.30.0.2'
+
 TOKEN_DIR = Path.home() / '.local' / 'share' / 'ThetaCode'
 TOKEN_FILE = TOKEN_DIR / 'access_token'
 
@@ -40,10 +43,13 @@ def _get_host_ssh_public_keys() -> str:
 
 
 class Docker:
-    def __init__(self, image_name: str = IMAGE_NAME, container_name: str = CONTAINER_NAME, internal_port: int = INTERNAL_PORT):
+    def __init__(self, image_name: str = IMAGE_NAME, container_name: str = CONTAINER_NAME, internal_port: int = INTERNAL_PORT,
+                 network_name: str = NETWORK_NAME, container_ip: str = CONTAINER_IP):
         self.image_name = image_name
         self.container_name = container_name
         self.internal_port = internal_port
+        self._network_name = network_name
+        self._container_ip = container_ip
         self.access_token = _get_or_create_access_token()
         if not self._image_exists():
             self._build_image()
@@ -68,13 +74,27 @@ class Docker:
             check=True
         )
 
-    def start(self, port: int, ssh_port: int = 8022, additional_volumes: t.Optional[t.List[t.Tuple[str, str]]] = None, env: t.Optional[t.Dict[str, str]] = None):
+    def _ensure_network(self):
+        """Create the custom bridge network if it doesn't already exist."""
+        result = subprocess.run(
+            ['docker', 'network', 'ls', '--format', '{{.Name}}'],
+            capture_output=True,
+            text=True,
+        )
+        if self._network_name not in result.stdout.splitlines():
+            subprocess.run(
+                ['docker', 'network', 'create', '--subnet=172.30.0.0/16', self._network_name],
+                check=True,
+            )
+
+    def start(self, additional_volumes: t.Optional[t.List[t.Tuple[str, str]]] = None, env: t.Optional[t.Dict[str, str]] = None):
         self._stop_existing_container()
+        self._ensure_network()
         ssh_public_keys = _get_host_ssh_public_keys()
         cmd = [
             'docker', 'run', '-d', '--name', self.container_name,
-            '-p', f'{port}:{self.internal_port}',
-            '-p', f'{ssh_port}:22',
+            '--network', self._network_name,
+            '--ip', self._container_ip,
             '-e', f'ACCESS_TOKEN={self.access_token}',
             '-v', f"/opt/jetbrains_gateway:/opt/jetbrains_gateway",
         ]

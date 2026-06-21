@@ -4,7 +4,7 @@ import typing as t
 from pathlib import Path
 from time import sleep
 
-from docker import Docker
+from docker import Docker, CONTAINER_IP
 from requests import request
 from venv_finder import scan_for_venvs, VenvInfo
 from llm import T_CONVERSATION, T_STREAM_CALLBACK, load_prompt, LLM
@@ -80,7 +80,6 @@ class ThetaCode:
         if self._running:
             return
         self._docker.start(
-            port=self._port,
             additional_volumes=[(self._project.path, f"/home/agent/{self._project.name}")],
         )
         self._running = True
@@ -104,24 +103,24 @@ class ThetaCode:
             'venv': venv,
             'timeout': timeout,
         }
-        resp = request('post', f"http://localhost:{self._port}/execute", json=payload, headers=self._headers())
+        resp = request('post', f"http://{CONTAINER_IP}:{self._port}/execute", json=payload, headers=self._headers())
         return resp.json()
 
     def read_file(self, path: str) -> dict:
-        resp = request('post', f"http://localhost:{self._port}/read_file", json={'path': path}, headers=self._headers())
+        resp = request('post', f"http://{CONTAINER_IP}:{self._port}/read_file", json={'path': path}, headers=self._headers())
         return resp.json()
 
     def write_to_file(self, path: str, content: str) -> dict:
-        resp = request('post', f"http://localhost:{self._port}/write_to_file", json={'path': path, 'content': content}, headers=self._headers())
+        resp = request('post', f"http://{CONTAINER_IP}:{self._port}/write_to_file", json={'path': path, 'content': content}, headers=self._headers())
         return resp.json()
 
     def replace_in_file(self, path: str, search: str, replace: str) -> dict:
-        resp = request('post', f"http://localhost:{self._port}/replace_in_file", json={'path': path, 'search': search, 'replace': replace}, headers=self._headers())
+        resp = request('post', f"http://{CONTAINER_IP}:{self._port}/replace_in_file", json={'path': path, 'search': search, 'replace': replace}, headers=self._headers())
         return resp.json()
 
     def health_check(self) -> bool:
         try:
-            resp = request('get', f"http://localhost:{self._port}/", headers=self._headers(), timeout=5)
+            resp = request('get', f"http://{CONTAINER_IP}:{self._port}/", headers=self._headers(), timeout=5)
             return resp.status_code == 200
         except Exception:
             return False
