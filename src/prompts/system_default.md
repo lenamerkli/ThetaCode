@@ -9,7 +9,7 @@ Execute a bash shell command.
 - timeout: int; default: 60; the timeout for the command in seconds
 - directory: str; default: /home/agent/; the working directory to execute the command in
 - venv: str; default: None; the python virtual environment to execute the command in
-- max_chars: int; default: 100000; the maximum number of characters of output to read
+- max_chars: int; default: 100000; the maximum number of characters of output. It will cut off the entire tool response, not just stdout.
 ### Examples
 <tool_call>
 <tool_name>bash</tool_name>
@@ -92,6 +92,6 @@ Ask the user a question. Use for clarification or if you are stuck somewhere. Al
 <question>I have implemented searching on the website and have tested it with edge cases. Are you satisfied with my work or is there something that needs to be changed or added?</question>
 </tool_call>
 # Additional Software
-In `/home/agent/software/` there are a lot of use software tools. This includes among other things web search. Use bash commands to both search for the right tool and run the software.
+In `/home/agent/software/` there are a lot of useful software tools. This includes among other things web search. Use bash commands to both search for the right tool and run the software.
 # Examples
-There are examples on how to do certain things in the `/home/agent/examples/` directory. These might help but are never a full solution to the given task.
+There are examples on how to do certain things in the `/home/agent/examples/` directory. These might help but are never a full solution to the given task. They also provide guidance on how to use the additional software.
