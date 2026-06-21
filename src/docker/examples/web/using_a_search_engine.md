@@ -5,6 +5,7 @@ The websearch software returns 5 lines of text per option.
 <directory>/home/agent/tmp/</directory>
 </tool_call>
 <tool_response>
+The command above will return an output like this:
 <stdout>
 1. session auth in python - Stack Overflow
    URL:     https://stackoverflow.com/questions/44020439/session-auth-in-python
