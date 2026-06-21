@@ -140,6 +140,11 @@ class ThetaCodeApp:
                         borderwidth=1, relief="solid")
         style.configure("TProgressbar", troughcolor=BG_SURFACE_CONTAINER, background=ACCENT_BLUE)
         style.configure("TSeparator", background="#3d3d3d")
+        style.configure("Headroom.TCheckbutton", background=BG_SURFACE, foreground=FG_PRIMARY,
+                        borderwidth=0, relief="flat")
+        style.map("Headroom.TCheckbutton",
+                  background=[("active", BG_SURFACE), ("selected", BG_SURFACE)],
+                  foreground=[("selected", FG_TERTIARY)])
 
         self.root.option_add("*Listbox.background", BG_SURFACE_LOW)
         self.root.option_add("*Listbox.foreground", FG_PRIMARY)
@@ -293,7 +298,15 @@ class ThetaCodeApp:
 
         self._cost_label = tk.Label(status_right, text="Cost: $0.0000", bg=BG_SURFACE,
                                     fg=FG_VARIANT, font=("TkDefaultFont", 10))
-        self._cost_label.pack(side=tk.LEFT)
+        self._cost_label.pack(side=tk.LEFT, padx=(0, 12))
+
+        self._headroom_var = tk.BooleanVar(value=False)
+        self._headroom_cb = ttk.Checkbutton(
+            status_right, text="Headroom", variable=self._headroom_var,
+            style="Headroom.TCheckbutton",
+        )
+        self._headroom_cb.pack(side=tk.LEFT)
+        self._headroom_var.trace_add("write", lambda *a: self._on_headroom_toggle())
 
         self._docker_label = tk.Label(status_row, text="", bg=BG_SURFACE, fg=FG_VARIANT,
                                       font=("TkDefaultFont", 10, "italic"))
@@ -1176,6 +1189,14 @@ class ThetaCodeApp:
         self._cancel_btn.pack_forget()
         self._cancel_btn.configure(state=tk.DISABLED)
 
+    def _on_headroom_toggle(self):
+        """Called when the headroom checkbox is toggled."""
+        enabled = self._headroom_var.get()
+        status = "ON" if enabled else "OFF"
+        prev = self._docker_label.cget("text")
+        self._docker_label.configure(text=f"Headroom {status}")
+        self.root.after(1500, lambda: self._docker_label.configure(text=prev))
+
     def _do_cancel(self):
         state = self._get_active_chat_state()
         if not state or not state.is_thinking:
@@ -1201,7 +1222,7 @@ class ThetaCodeApp:
         chat_obj = state.chat
         llm_str = (self._model_var.get() or DEFAULT_MODEL).strip()
         try:
-            llm = get_llm(llm_str)
+            llm = get_llm(llm_str, headroom_enabled=self._headroom_var.get())
         except ValueError as exc:
             self._add_message_bubble({
                 "role": "assistant", "content": f"[Configuration error] {exc}\n\nPlease set a valid model name above.",

@@ -5,6 +5,7 @@ from os import environ
 from pathlib import Path
 import json
 import typing as t
+from importlib.util import find_spec
 
 
 T_CONVERSATION = t.List[t.Dict[str, str]]
@@ -37,10 +38,35 @@ class LLM(ABC):
 
 
 class OpenRouterLLM(LLM):
-    def __init__(self, model: str):
+    def __init__(self, model: str, headroom_enabled: bool = False):
         self.model = model
+        self.headroom_enabled = headroom_enabled
+
+    def _compress_conversation(self, conversation: T_CONVERSATION) -> T_CONVERSATION:
+        """Compress the conversation using headroom if available and enabled."""
+        if not self.headroom_enabled:
+            return conversation
+        if not find_spec('headroom'):
+            return conversation
+        try:
+            from headroom import compress
+            result = compress(
+                conversation,
+                model=self.model.split('/')[-1],
+                compress_system_messages=False,
+                protect_recent=2,
+                compress_user_messages=True,
+            )
+            if result.tokens_saved > 0:
+                print(f"[Headroom] Saved {result.tokens_saved} tokens "
+                      f"({result.compression_ratio:.1%} ratio)")
+            return result.messages
+        except Exception as e:
+            print(f"[Headroom] Compression skipped: {e}")
+            return conversation
 
     def generate(self, conversation: T_CONVERSATION) -> T_COMPLETION:
+        conversation = self._compress_conversation(conversation)
         model_name = self.model.replace('OpenRouter', '').replace('openrouter', '')
         if model_name[0] == '/':
             model_name = model_name[1:]
@@ -85,6 +111,9 @@ class OpenRouterLLM(LLM):
         If ``cancel_event`` is set, the stream is aborted early and a partial
         T_COMPLETION is returned with whatever was accumulated so far.
         """
+        # Compress before streaming
+        conversation = self._compress_conversation(conversation)
+
         # Check cancellation before even starting the request
         if cancel_event and cancel_event.is_set():
             return {"text": "", "cost": 0.0, "thinking": ""}
@@ -184,9 +213,9 @@ class OpenRouterLLM(LLM):
         }
 
 
-def get_llm(model: str) -> LLM:
+def get_llm(model: str, headroom_enabled: bool = False) -> LLM:
     if model.startswith('OpenRouter') or model.startswith('openrouter'):
-        return OpenRouterLLM(model)
+        return OpenRouterLLM(model, headroom_enabled=headroom_enabled)
     else:
         raise ValueError(f"Unknown model: {model}")
 
