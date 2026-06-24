@@ -98,7 +98,7 @@ class Docker:
             '--ip', self._container_ip,
             '-e', f'ACCESS_TOKEN={self.access_token}',
             '-v', f"/opt/jetbrains_gateway:/opt/jetbrains_gateway",
-            '-v', f"{docker_dir}/opt:/opt:ro",
+            '-v', f"{docker_dir}/opt:/opt/thetacode:ro",
             '-v', f"{docker_dir}/software:/home/agent/software:ro",
             '-v', f"{docker_dir}/examples:/home/agent/examples:ro",
         ]

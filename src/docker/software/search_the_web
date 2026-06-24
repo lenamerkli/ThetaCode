@@ -2,7 +2,7 @@
 
 # Allow Python version to be overridden via environment variable
 PYTHON_VERSION="/usr/bin/python3"
-PYTHON_SCRIPT="/opt/search_the_web.py"
+PYTHON_SCRIPT="/opt/thetacode/search_the_web.py"
 
 # Execute
 "$PYTHON_VERSION" "$PYTHON_SCRIPT" "$@"
