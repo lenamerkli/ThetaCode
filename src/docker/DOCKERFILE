@@ -1,12 +1,11 @@
 FROM debian:trixie-slim
-RUN apt-get update && apt-get upgrade -y && apt-get install -y vim curl wget git python3 python3-pip libxml2-dev libxslt-dev libjpeg62-turbo-dev openssh-server apt-transport-https gpg && apt-get clean && rm -rf /var/lib/apt/lists/*
-RUN wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/adoptium.gpg > /dev/null
-RUN echo "deb https://packages.adoptium.net/artifactory/deb $(awk -F= '/^VERSION_CODENAME/{print$2}' /etc/os-release) main" | sudo tee /etc/apt/sources.list.d/adoptium.list
+RUN apt-get update && apt-get upgrade -y && apt-get install -y vim curl wget git python3 python3-pip python3-venv libxml2-dev libxslt-dev libjpeg62-turbo-dev openssh-server apt-transport-https gpg && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor | tee /etc/apt/trusted.gpg.d/adoptium.gpg > /dev/null
+RUN echo "deb https://packages.adoptium.net/artifactory/deb $(awk -F= '/^VERSION_CODENAME/{print$2}' /etc/os-release) main" | tee /etc/apt/sources.list.d/adoptium.list
 RUN apt-get update && apt-get install -y temurin-25-jdk temurin-21-jdk temurin-17-jdk && apt-get clean && rm -rf /var/lib/apt/lists/*
 RUN pip3 install --break-system-packages --no-cache-dir flask requests beautifulsoup4 curl-cffi crawl4ai
 RUN pip3 install --break-system-packages --no-cache-dir playwright && python3 -m playwright install chromium && python3 -m playwright install-deps chromium
-RUN mkdir -p /home/agent/tools /home/agent/examples
-RUN mkdir -p /home/agent/tmp
+RUN mkdir -p /home/agent/tools /home/agent/examples /home/agent/tmp
 RUN echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config && mkdir -p /run/sshd
 WORKDIR /opt
 COPY app.py /opt/app.py

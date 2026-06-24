@@ -707,7 +707,8 @@ class ThetaCodeApp:
             p = filedialog.askdirectory(title="Select project folder", parent=dialog)
             if p:
                 path_var.set(p)
-        tk.Button(path_frame, text="📁", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, font=("TkDefaultFont", 14), activebackground="#3d3d3d", activeforeground=FG_PRIMARY, command=browse, cursor="hand2").pack(side=tk.RIGHT, padx=(4, 0))
+        browse_btn = tk.Button(path_frame, text="📁", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, font=("TkDefaultFont", 14), activebackground="#3d3d3d", activeforeground=FG_PRIMARY, command=browse, cursor="hand2")
+        browse_btn.pack(side=tk.RIGHT, padx=(4, 0))
         error_label = tk.Label(frame, text="", bg=BG_SURFACE_CONTAINER, fg=DANGER_RED, font=("TkDefaultFont", 10))
         btn_frame = tk.Frame(frame, bg=BG_SURFACE_CONTAINER)
         btn_frame.pack(fill=tk.X)
@@ -730,17 +731,49 @@ class ThetaCodeApp:
                 has_error = True
             if has_error:
                 return
-            try:
-                proj = Project.create(name, path)
-                pid = self.storage.create_project(name, path)
-                self.storage.update_project_paths(pid, proj.path, proj.original_path)
-            except Exception as exc:
-                error_label.configure(text=str(exc))
-                error_label.pack(fill=tk.X, pady=(0, 8))
-                return
-            dialog.destroy()
-            self._refresh_projects()
-            self._select_project_by_id(pid)
+
+            # Disable form and show progress indicator
+            error_label.pack_forget()
+            name_entry.configure(state=tk.DISABLED)
+            path_entry.configure(state=tk.DISABLED)
+            browse_btn.configure(state=tk.DISABLED)
+            for child in btn_frame.winfo_children():
+                child.configure(state=tk.DISABLED)
+
+            progress_label = tk.Label(frame, text="Initializing project…", bg=BG_SURFACE_CONTAINER,
+                                      fg=FG_TERTIARY, font=("TkDefaultFont", 10, "italic"))
+            progress_label.pack(fill=tk.X, pady=(0, 4))
+            progress_bar = ttk.Progressbar(frame, mode="indeterminate", length=200, style="TProgressbar")
+            progress_bar.pack(fill=tk.X, pady=(0, 8))
+            progress_bar.start(10)
+
+            def _create_worker():
+                try:
+                    proj = Project.create(name, path)
+                    pid = self.storage.create_project(name, path)
+                    self.storage.update_project_paths(pid, proj.path, proj.original_path)
+                except Exception as exc:
+                    def _on_error():
+                        progress_bar.stop()
+                        progress_bar.pack_forget()
+                        progress_label.pack_forget()
+                        name_entry.configure(state=tk.NORMAL)
+                        path_entry.configure(state=tk.NORMAL)
+                        browse_btn.configure(state=tk.NORMAL)
+                        for child in btn_frame.winfo_children():
+                            child.configure(state=tk.NORMAL)
+                        error_label.configure(text=str(exc))
+                        error_label.pack(fill=tk.X, pady=(0, 8))
+                    self.root.after(0, _on_error)
+                    return
+
+                def _on_success():
+                    dialog.destroy()
+                    self._refresh_projects()
+                    self._select_project_by_id(pid)
+                self.root.after(0, _on_success)
+
+            threading.Thread(target=_create_worker, daemon=True).start()
         tk.Button(btn_frame, text="Cancel", bg=BG_SURFACE, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10), activebackground="#3d3d3d", activeforeground=FG_PRIMARY, command=dialog.destroy, cursor="hand2").pack(side=tk.RIGHT, padx=(8, 0))
         tk.Button(btn_frame, text="Create", bg=ACCENT_BLUE, fg="#ffffff", relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10, "bold"), activebackground="#5ab8ff", activeforeground="#ffffff", command=create, cursor="hand2").pack(side=tk.RIGHT)
         dialog.bind("<Return>", lambda e: create())
