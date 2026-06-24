@@ -91,12 +91,16 @@ class Docker:
         self._stop_existing_container()
         self._ensure_network()
         ssh_public_keys = _get_host_ssh_public_keys()
+        docker_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docker')
         cmd = [
             'docker', 'run', '-d', '--name', self.container_name,
             '--network', self._network_name,
             '--ip', self._container_ip,
             '-e', f'ACCESS_TOKEN={self.access_token}',
             '-v', f"/opt/jetbrains_gateway:/opt/jetbrains_gateway",
+            '-v', f"{docker_dir}/opt:/opt:ro",
+            '-v', f"{docker_dir}/software:/home/agent/software:ro",
+            '-v', f"{docker_dir}/examples:/home/agent/examples:ro",
         ]
         if ssh_public_keys:
             cmd.extend(['-e', f'SSH_PUBLIC_KEY={ssh_public_keys}'])
