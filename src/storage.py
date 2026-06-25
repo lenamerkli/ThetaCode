@@ -28,6 +28,7 @@ class Storage:
                     name           TEXT    NOT NULL UNIQUE,
                     path           TEXT    NOT NULL,
                     original_path  TEXT,
+                    mode           TEXT    NOT NULL DEFAULT 'docker',
                     created_at     REAL    NOT NULL
                 );
 
@@ -56,6 +57,12 @@ class Storage:
                 conn.execute("SELECT original_path FROM projects LIMIT 1")
             except sqlite3.OperationalError:
                 conn.execute("ALTER TABLE projects ADD COLUMN original_path TEXT")
+
+            # Migrate old DBs that lack mode
+            try:
+                conn.execute("SELECT mode FROM projects LIMIT 1")
+            except sqlite3.OperationalError:
+                conn.execute("ALTER TABLE projects ADD COLUMN mode TEXT NOT NULL DEFAULT 'docker'")
             conn.commit()
 
         self._migrate_projects_to_working_copy()
@@ -94,12 +101,12 @@ class Storage:
     # Projects
     # ------------------------------------------------------------------
 
-    def create_project(self, name: str, path: str) -> int:
+    def create_project(self, name: str, path: str, mode: str = 'docker') -> int:
         """Insert a new project and return its id."""
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT INTO projects (name, path, created_at) VALUES (?, ?, ?)",
-                (name, path, time.time()),
+                "INSERT INTO projects (name, path, mode, created_at) VALUES (?, ?, ?, ?)",
+                (name, path, mode, time.time()),
             )
             conn.commit()
             return cur.lastrowid
@@ -108,14 +115,14 @@ class Storage:
         """Return all projects ordered by creation time."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, name, path, original_path, created_at FROM projects ORDER BY created_at"
+                "SELECT id, name, path, original_path, mode, created_at FROM projects ORDER BY created_at"
             ).fetchall()
         return [dict(r) for r in rows]
 
     def get_project(self, project_id: int) -> dict | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, name, path, original_path, created_at FROM projects WHERE id = ?",
+                "SELECT id, name, path, original_path, mode, created_at FROM projects WHERE id = ?",
                 (project_id,),
             ).fetchone()
         return dict(row) if row else None

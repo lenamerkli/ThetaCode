@@ -24,6 +24,7 @@ from storage import Storage                        # noqa: E402
 from main import Project, ThetaCode, Chat          # noqa: E402
 from llm import get_llm                            # noqa: E402
 from merge import detect_changes, apply_changes, GitignoreMatcher, make_diff  # noqa: E402
+from local_executor import RESOURCES_DIR, RESOURCES_VENV  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -94,6 +95,8 @@ class _ChatState:
         self.cost = 0.0
         self.stream_placeholders: dict = {}
         self._poll_running = False  # avoid duplicate UI poll loops
+        self.pending_approval: dict | None = None  # {tool_name, params}
+        self.approval_event: threading.Event | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +637,24 @@ class ThetaCodeApp:
                     self._projects_list.see(i)
                     break
 
+    def _refresh_project_list_with_mode(self):
+        """Refresh project list entries to show mode badges."""
+        items = self.storage.get_projects()
+        self._projects_list.delete(0, tk.END)
+        self._projects_list._cached_data = {}
+        for i, item in enumerate(items):
+            mode = item.get("mode", "docker")
+            mode_badge = "🐳" if mode == "docker" else "💻"
+            display_name = f"{mode_badge}  {item['name']}"
+            self._projects_list.insert(tk.END, display_name)
+            self._projects_list._cached_data[i] = item
+        if self.project_id is not None:
+            for i, item in enumerate(items):
+                if item["id"] == self.project_id:
+                    self._projects_list.select_set(i)
+                    self._projects_list.see(i)
+                    break
+
     def _on_project_select(self, event=None):
         data = self._get_selected_listbox_data(self._projects_list)
         if not data:
@@ -656,6 +677,8 @@ class ThetaCodeApp:
         self._merge_project_btn.configure(state=tk.NORMAL)
         self._refresh_projects()
         self._refresh_chats()
+        # Show project mode in list
+        self._refresh_project_list_with_mode()
 
     def _confirm_delete_project(self):
         if self.project_id is None:
@@ -699,7 +722,24 @@ class ThetaCodeApp:
         name_entry.focus_set()
         tk.Label(frame, text="Project Path", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY, font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill=tk.X)
         path_frame = tk.Frame(frame, bg=BG_SURFACE_CONTAINER)
-        path_frame.pack(fill=tk.X, pady=(4, 16))
+        path_frame.pack(fill=tk.X, pady=(4, 4))
+
+        # Mode toggle
+        tk.Label(frame, text="Execution Mode", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
+                 font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill=tk.X)
+        mode_frame = tk.Frame(frame, bg=BG_SURFACE_CONTAINER)
+        mode_frame.pack(fill=tk.X, pady=(4, 16))
+        mode_var = tk.StringVar(value="docker")
+        docker_rb = tk.Radiobutton(mode_frame, text="Docker (isolated)", variable=mode_var,
+                                   value="docker", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
+                                   activebackground=BG_SURFACE_CONTAINER, activeforeground=ACCENT_BLUE,
+                                   selectcolor=BG_SURFACE_CONTAINER, font=("TkDefaultFont", 10))
+        docker_rb.pack(side=tk.LEFT, padx=(0, 16))
+        local_rb = tk.Radiobutton(mode_frame, text="Local (direct)", variable=mode_var,
+                                  value="local", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
+                                  activebackground=BG_SURFACE_CONTAINER, activeforeground=ACCENT_BLUE,
+                                  selectcolor=BG_SURFACE_CONTAINER, font=("TkDefaultFont", 10))
+        local_rb.pack(side=tk.LEFT)
         path_var = tk.StringVar()
         path_entry = tk.Entry(path_frame, textvariable=path_var, bg=BG_SURFACE, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, insertbackground=FG_PRIMARY, font=("TkDefaultFont", 11), width=32)
         path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -715,6 +755,7 @@ class ThetaCodeApp:
         def create():
             name = name_var.get().strip()
             path = path_var.get().strip()
+            mode = mode_var.get()
             has_error = False
             if not name:
                 error_label.configure(text="Name is required")
@@ -749,8 +790,8 @@ class ThetaCodeApp:
 
             def _create_worker():
                 try:
-                    proj = Project.create(name, path)
-                    pid = self.storage.create_project(name, path)
+                    proj = Project.create(name, path, mode=mode)
+                    pid = self.storage.create_project(name, path, mode=mode)
                     self.storage.update_project_paths(pid, proj.path, proj.original_path)
                 except Exception as exc:
                     def _on_error():
@@ -839,7 +880,9 @@ class ThetaCodeApp:
         proj_row = self.storage.get_project(self.project_id)
         if not proj_row:
             return
-        project = Project.from_path(proj_row["name"], proj_row["path"], proj_row.get("original_path"))
+        project = Project.from_path(proj_row["name"], proj_row["path"],
+                                    proj_row.get("original_path"),
+                                    mode=proj_row.get("mode", "docker"))
         stored_msgs = self.storage.get_messages(chat_id)
         frame, text_widget = self._create_chat_widget()
         state = _ChatState(chat_id, frame, text_widget)
@@ -856,7 +899,8 @@ class ThetaCodeApp:
                 time.sleep(0.2)
             if self.project_id != captured_project_id or chat_id not in self._chat_states:
                 return
-            chat_obj = Chat(project, self.theta_code)
+            chat_obj = Chat(project, self.theta_code,
+                            on_approval_needed=self._on_approval_needed)
             chat_obj.restore_messages(stored_msgs)
             cs = self._chat_states[chat_id]
             cs.chat = chat_obj
@@ -925,12 +969,23 @@ class ThetaCodeApp:
             self._cost_label.configure(text="Cost: $0.0000")
             return
         self._cost_label.configure(text=f"Cost: ${state.cost:.4f}")
-        if self.theta_code and self.theta_code._running:
-            self._docker_label.configure(text="Docker ready ✓")
-        elif self._docker_starting:
-            self._docker_label.configure(text="Building / starting Docker…")
+        proj_row = None
+        if self.project_id:
+            proj_row = self.storage.get_project(self.project_id)
+        project_mode = proj_row.get("mode", "docker") if proj_row else "docker"
+
+        if project_mode == "local":
+            if self.theta_code and self.theta_code._running:
+                self._docker_label.configure(text="Local mode ready ✓")
+            else:
+                self._docker_label.configure(text="")
         else:
-            self._docker_label.configure(text="")
+            if self.theta_code and self.theta_code._running:
+                self._docker_label.configure(text="Docker ready ✓")
+            elif self._docker_starting:
+                self._docker_label.configure(text="Building / starting Docker…")
+            else:
+                self._docker_label.configure(text="")
         if state.is_thinking:
             self._show_thinking_indicator()
             self._disable_input()
@@ -952,20 +1007,27 @@ class ThetaCodeApp:
         proj_row = self.storage.get_project(pid)
         if not proj_row:
             return
-        project = Project.from_path(proj_row["name"], proj_row["path"], proj_row.get("original_path"))
+        mode = proj_row.get("mode", "docker")
+        project = Project.from_path(proj_row["name"], proj_row["path"],
+                                    proj_row.get("original_path"), mode=mode)
         def _docker_worker():
             try:
                 if self.project_id != pid:
                     return
                 tc = self.theta_code
                 if tc is None:
-                    tc = ThetaCode()
+                    tc = ThetaCode(mode=mode)
                     tc.set_project(project)
                     self.theta_code = tc
                 if not tc._running:
-                    self.root.after(0, lambda: self._docker_label.configure(text="Building / starting Docker…"))
-                    tc.start_docker(recreate_venvs=False)
-                    self.root.after(0, lambda: self._docker_label.configure(text="Docker ready ✓"))
+                    if mode == "local":
+                        self.root.after(0, lambda: self._docker_label.configure(text="Starting local mode…"))
+                        tc.start(recreate_venvs=False)
+                        self.root.after(0, lambda: self._docker_label.configure(text="Local mode ready ✓"))
+                    else:
+                        self.root.after(0, lambda: self._docker_label.configure(text="Building / starting Docker…"))
+                        tc.start_docker(recreate_venvs=False)
+                        self.root.after(0, lambda: self._docker_label.configure(text="Docker ready ✓"))
             except Exception as exc:
                 self.root.after(0, lambda e=str(exc): self._docker_label.configure(text=f"Docker error: {e}"))
             finally:
@@ -1447,6 +1509,83 @@ class ThetaCodeApp:
         prev = self._docker_label.cget("text")
         self._docker_label.configure(text="Copied to clipboard ✓")
         self.root.after(2000, lambda: self._docker_label.configure(text=prev))
+
+    # -----------------------------------------------------------------------
+    # Approval mechanism (local mode only)
+    # -----------------------------------------------------------------------
+    def _on_approval_needed(self, tool_name: str, preview: str) -> str:
+        """Called from Chat._dispatch_tool when a tool needs user approval in local mode.
+
+        Shows a modal dialog asking the user to approve or deny the operation.
+        Returns 'approved' or 'denied'.
+        """
+        result = {'value': 'denied'}
+
+        def _show_dialog():
+            dialog = tk.Toplevel(self.root)
+            dialog.title(f"Approve {tool_name}")
+            dialog.configure(bg=BG_SURFACE_CONTAINER)
+            dialog.resizable(True, True)
+            dialog.transient(self.root)
+            dialog.grab_set()
+            dialog.geometry("600x400")
+            dialog.geometry("+%d+%d" % (
+                self.root.winfo_rootx() + self.root.winfo_width() // 2 - 300,
+                self.root.winfo_rooty() + self.root.winfo_height() // 2 - 200,
+            ))
+
+            frame = tk.Frame(dialog, bg=BG_SURFACE_CONTAINER, padx=20, pady=20)
+            frame.pack(fill=tk.BOTH, expand=True)
+
+            tk.Label(frame, text=f"Approve {tool_name} operation?",
+                     bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
+                     font=("TkDefaultFont", 12, "bold"), anchor="w").pack(fill=tk.X, pady=(0, 12))
+
+            preview_text = tk.Text(frame, bg=BG_SURFACE, fg=FG_PRIMARY,
+                                   relief=tk.FLAT, bd=0, insertbackground=FG_PRIMARY,
+                                   font=("TkDefaultFont", 11), wrap=tk.WORD,
+                                   padx=10, pady=10, height=10)
+            preview_text.insert("1.0", preview)
+            preview_text.configure(state=tk.DISABLED)
+            preview_text.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+
+            btn_frame = tk.Frame(frame, bg=BG_SURFACE_CONTAINER)
+            btn_frame.pack(fill=tk.X)
+
+            def _deny():
+                result['value'] = 'denied'
+                dialog.destroy()
+
+            def _approve():
+                result['value'] = 'approved'
+                dialog.destroy()
+
+            tk.Button(btn_frame, text="Deny", bg="#8a3a3a", fg="#ffffff",
+                      relief=tk.FLAT, bd=0, font=("TkDefaultFont", 11, "bold"),
+                      activebackground="#a44a4a", activeforeground="#ffffff",
+                      command=_deny, cursor="hand2", padx=16, pady=4).pack(side=tk.RIGHT, padx=(8, 0))
+            tk.Button(btn_frame, text="Approve", bg="#3a8a3a", fg="#ffffff",
+                      relief=tk.FLAT, bd=0, font=("TkDefaultFont", 11, "bold"),
+                      activebackground="#4aa44a", activeforeground="#ffffff",
+                      command=_approve, cursor="hand2", padx=16, pady=4).pack(side=tk.RIGHT)
+
+            dialog.protocol("WM_DELETE_WINDOW", _deny)
+            dialog.wait_window()
+
+        self.root.after(0, _show_dialog)
+        # Wait for the dialog to complete
+        while True:
+            # Process tkinter events
+            try:
+                self.root.update()
+            except tk.TclError:
+                break
+            # Check if dialog has been answered
+            if result['value'] in ('approved', 'denied'):
+                break
+            time.sleep(0.05)
+
+        return result['value']
 
     # -----------------------------------------------------------------------
     def run(self):

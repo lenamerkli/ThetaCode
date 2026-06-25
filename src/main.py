@@ -5,31 +5,38 @@ from pathlib import Path
 from time import sleep
 
 from docker import Docker, CONTAINER_IP
+from local_executor import LocalExecutor, RESOURCES_DIR
 from requests import request
-from venv_finder import scan_for_venvs, VenvInfo
 from llm import T_CONVERSATION, T_STREAM_CALLBACK, load_prompt, LLM
 
 
 class Project:
-    def __init__(self, name: str, path: str, original_path: str | None = None):
+    def __init__(self, name: str, path: str, original_path: str | None = None,
+                 mode: str = 'docker'):
         self.name = name
         self.path = path
         # original_path defaults to path for backward compatibility
         self.original_path = original_path or path
+        self.mode = mode
 
     @classmethod
-    def create(cls, name: str, original_path: str) -> 'Project':
-        dest = Path.home() / '.local' / 'share' / 'ThetaCode' / 'projects' / name / 'files'
-        dest.mkdir(parents=True, exist_ok=True)
-        src = Path(original_path)
-        if src.is_dir():
-            shutil.copytree(str(src), str(dest), dirs_exist_ok=True)
-        return cls(name, str(dest), original_path=original_path)
+    def create(cls, name: str, original_path: str, mode: str = 'docker') -> 'Project':
+        if mode == 'docker':
+            dest = Path.home() / '.local' / 'share' / 'ThetaCode' / 'projects' / name / 'files'
+            dest.mkdir(parents=True, exist_ok=True)
+            src = Path(original_path)
+            if src.is_dir():
+                shutil.copytree(str(src), str(dest), dirs_exist_ok=True)
+            return cls(name, str(dest), original_path=original_path, mode=mode)
+        else:
+            # Local mode: work directly on the original path, no copying
+            return cls(name, original_path, original_path=original_path, mode=mode)
 
     @classmethod
-    def from_path(cls, name: str, path: str, original_path: str | None = None) -> 'Project':
+    def from_path(cls, name: str, path: str, original_path: str | None = None,
+                  mode: str = 'docker') -> 'Project':
         """Load an existing project directly from a path without copying."""
-        return cls(name, path, original_path=original_path)
+        return cls(name, path, original_path=original_path, mode=mode)
 
 
 
@@ -39,16 +46,42 @@ T_MSG_CALLBACK = t.Callable[[dict], None]
 
 
 class ThetaCode:
-    def __init__(self, port: int = 50000):
-        self._docker = Docker()
+    def __init__(self, port: int = 50000, mode: str = 'docker'):
+        self._mode = mode
+        if mode == 'docker':
+            self._backend = Docker()
+        else:
+            self._backend = None  # LocalExecutor created when project is set
         self._project = None
         self._port = port
         self._running = False
 
     def set_project(self, project: Project):
         self._project = project
+        if self._mode == 'local' and self._backend is None:
+            self._backend = LocalExecutor(project.name, project.original_path or project.path)
 
-    def _recreate_venv(self, venv: VenvInfo):
+    def start(self, recreate_venvs: bool = True):
+        if not self._project:
+            raise ValueError("Project not specified")
+        if self._running:
+            return
+        if self._mode == 'docker':
+            self._backend.start(
+                additional_volumes=[(self._project.path, f"/home/agent/{self._project.name}")],
+            )
+            self._running = True
+            sleep(1)
+            if recreate_venvs:
+                from venv_finder import scan_for_venvs
+                venvs = scan_for_venvs(self._project.path)
+                for venv in venvs:
+                    self._recreate_venv(venv)
+        else:
+            self._backend.start()
+            self._running = True
+
+    def _recreate_venv(self, venv):
         project_path = Path(self._project.path)
         venv_path = venv.path
         try:
@@ -74,67 +107,72 @@ class ThetaCode:
                     cwd=f"/home/agent/{self._project.name}",
                 )
 
+    # Keep old name for backward compatibility
     def start_docker(self, recreate_venvs: bool = True):
-        if not self._project:
-            raise ValueError("Project not specified")
-        if self._running:
-            return
-        self._docker.start(
-            additional_volumes=[(self._project.path, f"/home/agent/{self._project.name}")],
-        )
-        self._running = True
-        sleep(1)
-        if recreate_venvs:
-            venvs = self._get_venvs()
-            for venv in venvs:
-                self._recreate_venv(venv)
+        self.start(recreate_venvs)
 
     # Keep old name for backward compatibility
     def _start_docker(self, recreate_venvs: bool = True):
-        self.start_docker(recreate_venvs)
+        self.start(recreate_venvs)
 
     def _headers(self) -> dict:
-        return {'Authorization': f'Bearer {self._docker.access_token}'}
+        return {'Authorization': f'Bearer {self._backend.access_token}'}
 
     def execute_in_docker(self, command: str, cwd: str = '/home/agent/', venv: str = '', timeout: int = 60):
-        payload = {
-            'command': command,
-            'cwd': cwd,
-            'venv': venv,
-            'timeout': timeout,
-        }
-        resp = request('post', f"http://{CONTAINER_IP}:{self._port}/execute", json=payload, headers=self._headers())
-        return resp.json()
+        if self._mode == 'docker':
+            payload = {
+                'command': command,
+                'cwd': cwd,
+                'venv': venv,
+                'timeout': timeout,
+            }
+            resp = request('post', f"http://{CONTAINER_IP}:{self._port}/execute", json=payload, headers=self._headers())
+            return resp.json()
+        else:
+            return self._backend.execute(command=command, cwd=cwd, venv=venv, timeout=timeout)
 
     def read_file(self, path: str) -> dict:
-        resp = request('post', f"http://{CONTAINER_IP}:{self._port}/read_file", json={'path': path}, headers=self._headers())
-        return resp.json()
+        if self._mode == 'docker':
+            resp = request('post', f"http://{CONTAINER_IP}:{self._port}/read_file", json={'path': path}, headers=self._headers())
+            return resp.json()
+        else:
+            return self._backend.read_file(path)
 
     def write_to_file(self, path: str, content: str) -> dict:
-        resp = request('post', f"http://{CONTAINER_IP}:{self._port}/write_to_file", json={'path': path, 'content': content}, headers=self._headers())
-        return resp.json()
+        if self._mode == 'docker':
+            resp = request('post', f"http://{CONTAINER_IP}:{self._port}/write_to_file", json={'path': path, 'content': content}, headers=self._headers())
+            return resp.json()
+        else:
+            return self._backend.write_to_file(path, content)
 
     def replace_in_file(self, path: str, search: str, replace: str) -> dict:
-        resp = request('post', f"http://{CONTAINER_IP}:{self._port}/replace_in_file", json={'path': path, 'search': search, 'replace': replace}, headers=self._headers())
-        return resp.json()
+        if self._mode == 'docker':
+            resp = request('post', f"http://{CONTAINER_IP}:{self._port}/replace_in_file", json={'path': path, 'search': search, 'replace': replace}, headers=self._headers())
+            return resp.json()
+        else:
+            return self._backend.replace_in_file(path, search, replace)
 
     def health_check(self) -> bool:
-        try:
-            resp = request('get', f"http://{CONTAINER_IP}:{self._port}/", headers=self._headers(), timeout=5)
-            return resp.status_code == 200
-        except Exception:
-            return False
+        if self._mode == 'docker':
+            try:
+                resp = request('get', f"http://{CONTAINER_IP}:{self._port}/", headers=self._headers(), timeout=5)
+                return resp.status_code == 200
+            except Exception:
+                return False
+        else:
+            return self._backend.health_check()
 
-    def _get_venvs(self):
-        return scan_for_venvs(self._project.path)
-
-    def stop_docker(self):
+    def stop(self):
         if self._running:
-            self._docker.stop()
+            self._backend.stop()
             self._running = False
 
+    # Keep old name for backward compatibility
+    def stop_docker(self):
+        self.stop()
+
     def _stop_docker(self):
-        self.stop_docker()
+        self.stop()
 
 
 class Chat:
@@ -144,9 +182,14 @@ class Chat:
     # waiting for the next human input.
     WAITING_FOR_USER = "WAITING_FOR_USER"
 
-    def __init__(self, project: Project, theta_code: ThetaCode):
+    # Sentinel returned by _dispatch_tool when approval is needed (local mode only)
+    NEEDS_APPROVAL = "NEEDS_APPROVAL"
+
+    def __init__(self, project: Project, theta_code: ThetaCode,
+                 on_approval_needed: t.Optional[t.Callable[[str, str], str]] = None):
         self._project = project
         self._theta_code = theta_code
+        self._on_approval_needed = on_approval_needed
         # First slot reserved for the system message (filled lazily).
         self._conversation: T_CONVERSATION = [{'role': 'system', 'content': ''}]
         self._cost = 0.0
@@ -185,9 +228,13 @@ class Chat:
                 self._conversation.append(entry)
 
     def _set_system_message(self, llm: LLM):
+        if self._project.mode == 'local':
+            prompt_name = 'system_default_local'
+        else:
+            prompt_name = 'system_default'
         self._conversation[0] = {
             'role': 'system',
-            'content': load_prompt('system_default').replace('%%project_name%%', self._project.name),
+            'content': load_prompt(prompt_name).replace('%%project_name%%', self._project.name),
         }
 
     def send_message(
@@ -347,6 +394,10 @@ class Chat:
 
             # Execute the tool.
             tool_response = self._dispatch_tool(tool_name, options)
+            if tool_response == Chat.NEEDS_APPROVAL:
+                # Approval was denied by the user — return the last answer
+                self._conversation[-1]['_approval_denied'] = True
+                return f"[User denied the {tool_name} operation.]"
             tool_entry = {
                 'role': 'user',
                 'content': f'<tool_response>\n{tool_response}\n</tool_response>',
@@ -367,6 +418,33 @@ class Chat:
     # ------------------------------------------------------------------
 
     def _dispatch_tool(self, tool_name: str, options: str) -> str:
+        # In local mode, bash and write_to_file require user approval
+        if self._project.mode == 'local' and self._on_approval_needed:
+            if tool_name in ('bash', 'write_to_file'):
+                command = self._parse_tool_param(options, 'command')
+                path = self._parse_tool_param(options, 'path')
+                content = self._parse_tool_param(options, 'content')
+
+                if tool_name == 'bash' and command:
+                    preview = f"Command: {command}"
+                elif tool_name == 'write_to_file' and path:
+                    preview = f"Write file: {path}\nContent: {content[:500]}..."
+                else:
+                    preview = f"{tool_name} operation"
+
+                result = self._on_approval_needed(tool_name, preview)
+                if result == 'denied':
+                    return Chat.NEEDS_APPROVAL
+                # approved — fall through to execute
+            elif tool_name == 'replace_in_file':
+                path = self._parse_tool_param(options, 'path')
+                if path:
+                    search = self._parse_tool_param(options, 'search')
+                    preview = f"Edit file: {path}\nSearch: {search[:200]}..."
+                    result = self._on_approval_needed(tool_name, preview)
+                    if result == 'denied':
+                        return Chat.NEEDS_APPROVAL
+
         match tool_name:
             case 'read_file':
                 path = self._parse_tool_param(options, 'path')
