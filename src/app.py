@@ -17,6 +17,9 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / '.env')
 
+# VM mode is controlled by an environment variable
+THETACODE_VM = os.environ.get('THETACODE_VM', '').strip() in ('1', 'true', 'yes', 'on')
+
 # Ensure the src package is importable when running as `python app.py`
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -628,7 +631,8 @@ class ThetaCodeApp:
     # Project list operations
     # -----------------------------------------------------------------------
     def _refresh_projects(self):
-        items = self.storage.get_projects()
+        mode_filter = 'vm' if THETACODE_VM else None
+        items = self.storage.get_projects(mode_filter=mode_filter)
         self._populate_listbox(self._projects_list, items, "id")
         if self.project_id is not None:
             for i, item in enumerate(items):
@@ -639,12 +643,18 @@ class ThetaCodeApp:
 
     def _refresh_project_list_with_mode(self):
         """Refresh project list entries to show mode badges."""
-        items = self.storage.get_projects()
+        mode_filter = 'vm' if THETACODE_VM else None
+        items = self.storage.get_projects(mode_filter=mode_filter)
         self._projects_list.delete(0, tk.END)
         self._projects_list._cached_data = {}
         for i, item in enumerate(items):
             mode = item.get("mode", "docker")
-            mode_badge = "🐳" if mode == "docker" else "💻"
+            if mode == "docker":
+                mode_badge = "🐳"
+            elif mode == "vm":
+                mode_badge = "📦"
+            else:
+                mode_badge = "💻"
             display_name = f"{mode_badge}  {item['name']}"
             self._projects_list.insert(tk.END, display_name)
             self._projects_list._cached_data[i] = item
@@ -724,22 +734,24 @@ class ThetaCodeApp:
         path_frame = tk.Frame(frame, bg=BG_SURFACE_CONTAINER)
         path_frame.pack(fill=tk.X, pady=(4, 4))
 
-        # Mode toggle
-        tk.Label(frame, text="Execution Mode", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
-                 font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill=tk.X)
-        mode_frame = tk.Frame(frame, bg=BG_SURFACE_CONTAINER)
-        mode_frame.pack(fill=tk.X, pady=(4, 16))
-        mode_var = tk.StringVar(value="docker")
-        docker_rb = tk.Radiobutton(mode_frame, text="Docker (isolated)", variable=mode_var,
-                                   value="docker", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
-                                   activebackground=BG_SURFACE_CONTAINER, activeforeground=ACCENT_BLUE,
-                                   selectcolor=BG_SURFACE_CONTAINER, font=("TkDefaultFont", 10))
-        docker_rb.pack(side=tk.LEFT, padx=(0, 16))
-        local_rb = tk.Radiobutton(mode_frame, text="Local (direct)", variable=mode_var,
-                                  value="local", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
-                                  activebackground=BG_SURFACE_CONTAINER, activeforeground=ACCENT_BLUE,
-                                  selectcolor=BG_SURFACE_CONTAINER, font=("TkDefaultFont", 10))
-        local_rb.pack(side=tk.LEFT)
+        # Mode toggle (hidden in VM mode — always "vm")
+        if not THETACODE_VM:
+            tk.Label(frame, text="Execution Mode", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
+                     font=("TkDefaultFont", 10, "bold"), anchor="w").pack(fill=tk.X)
+            mode_frame = tk.Frame(frame, bg=BG_SURFACE_CONTAINER)
+            mode_frame.pack(fill=tk.X, pady=(4, 16))
+        mode_var = tk.StringVar(value="vm" if THETACODE_VM else "docker")
+        if not THETACODE_VM:
+            docker_rb = tk.Radiobutton(mode_frame, text="Docker (isolated)", variable=mode_var,
+                                       value="docker", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
+                                       activebackground=BG_SURFACE_CONTAINER, activeforeground=ACCENT_BLUE,
+                                       selectcolor=BG_SURFACE_CONTAINER, font=("TkDefaultFont", 10))
+            docker_rb.pack(side=tk.LEFT, padx=(0, 16))
+            local_rb = tk.Radiobutton(mode_frame, text="Local (direct)", variable=mode_var,
+                                      value="local", bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
+                                      activebackground=BG_SURFACE_CONTAINER, activeforeground=ACCENT_BLUE,
+                                      selectcolor=BG_SURFACE_CONTAINER, font=("TkDefaultFont", 10))
+            local_rb.pack(side=tk.LEFT)
         path_var = tk.StringVar()
         path_entry = tk.Entry(path_frame, textvariable=path_var, bg=BG_SURFACE, fg=FG_PRIMARY, relief=tk.FLAT, bd=0, insertbackground=FG_PRIMARY, font=("TkDefaultFont", 11), width=32)
         path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -820,7 +832,8 @@ class ThetaCodeApp:
         dialog.bind("<Return>", lambda e: create())
 
     def _select_project_by_id(self, pid: int):
-        items = self.storage.get_projects()
+        mode_filter = 'vm' if THETACODE_VM else None
+        items = self.storage.get_projects(mode_filter=mode_filter)
         for i, item in enumerate(items):
             if item["id"] == pid:
                 self._projects_list.select_clear(0, tk.END)
@@ -979,6 +992,11 @@ class ThetaCodeApp:
                 self._docker_label.configure(text="Local mode ready ✓")
             else:
                 self._docker_label.configure(text="")
+        elif project_mode == "vm":
+            if self.theta_code and self.theta_code._running:
+                self._docker_label.configure(text="VM mode ready ✓")
+            else:
+                self._docker_label.configure(text="")
         else:
             if self.theta_code and self.theta_code._running:
                 self._docker_label.configure(text="Docker ready ✓")
@@ -1020,10 +1038,11 @@ class ThetaCodeApp:
                     tc.set_project(project)
                     self.theta_code = tc
                 if not tc._running:
-                    if mode == "local":
-                        self.root.after(0, lambda: self._docker_label.configure(text="Starting local mode…"))
+                    if mode in ("local", "vm"):
+                        label = "local" if mode == "local" else "VM"
+                        self.root.after(0, lambda l=label: self._docker_label.configure(text=f"Starting {l} mode…"))
                         tc.start(recreate_venvs=False)
-                        self.root.after(0, lambda: self._docker_label.configure(text="Local mode ready ✓"))
+                        self.root.after(0, lambda l=label: self._docker_label.configure(text=f"{l} mode ready ✓"))
                     else:
                         self.root.after(0, lambda: self._docker_label.configure(text="Building / starting Docker…"))
                         tc.start_docker(recreate_venvs=False)

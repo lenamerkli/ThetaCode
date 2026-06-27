@@ -59,6 +59,59 @@ def _ensure_resources() -> None:
     _symlink_examples()
 
 
+def _ensure_vm_resources() -> None:
+    """Set up resources directly on the filesystem mirroring the Docker layout.
+
+    In VM mode there is no path remapping — the LLM works with real host paths.
+    Resources are placed under $HOME (software/, examples/, tools/, tmp/) and
+    /opt/thetacode/ so they match the Docker container layout.
+    """
+    home = Path.home()
+
+    vm_dirs = [
+        home / 'software',
+        home / 'examples',
+        home / 'tools',
+        home / 'tmp',
+        Path('/opt/thetacode'),
+    ]
+    for d in vm_dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+    # Write software wrapper scripts into ~/software/
+    src_software_dir = Path(__file__).parent / 'docker' / 'software'
+    for script_name in ['search_the_web', 'webpage_to_markdown']:
+        dest = home / 'software' / script_name
+        wrapper = f'''#!/bin/bash
+# ThetaCode VM software wrapper
+source "{RESOURCES_VENV_ACTIVATE}"
+exec python3 "/opt/thetacode/{script_name}.py" "$@"
+'''
+        dest.write_text(wrapper)
+        dest.chmod(0o755)
+
+    # Copy opt scripts into /opt/thetacode/
+    src_opt_dir = Path(__file__).parent / 'docker' / 'opt'
+    opt_dir = Path('/opt/thetacode')
+    for py_file in src_opt_dir.glob('*.py'):
+        dest = opt_dir / py_file.name
+        if not dest.exists():
+            dest.write_text(py_file.read_text())
+
+    # Copy examples into ~/examples/
+    src_examples_dir = Path(__file__).parent / 'docker' / 'examples'
+    if src_examples_dir.exists():
+        def copy_tree(src: Path, dst: Path) -> None:
+            dst.mkdir(parents=True, exist_ok=True)
+            for item in src.iterdir():
+                target = dst / item.name
+                if item.is_dir():
+                    copy_tree(item, target)
+                elif not target.exists():
+                    target.write_text(item.read_text())
+        copy_tree(src_examples_dir, home / 'examples')
+
+
 def _install_resources_packages() -> None:
     """Install required packages into the resources venv."""
     for pkg in REQUIRED_PACKAGES:
@@ -165,13 +218,19 @@ class LocalExecutor:
     """Provides the same interface as the Docker HTTP backend but executes
     commands and file operations directly on the local host."""
 
-    def __init__(self, project_name: str, project_path: str):
+    def __init__(self, project_name: str, project_path: str, no_remap: bool = False):
         self.project_name = project_name
         self.project_path = project_path
-        _ensure_resources()
+        self._no_remap = no_remap
+        if no_remap:
+            _ensure_vm_resources()
+        else:
+            _ensure_resources()
         self.access_token = "local"  # not used, but keeps interface compatible
 
     def remap_path(self, path: str) -> str:
+        if self._no_remap:
+            return path
         return remap_path(path, self.project_name, self.project_path)
 
     def execute(

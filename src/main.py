@@ -29,7 +29,7 @@ class Project:
                 shutil.copytree(str(src), str(dest), dirs_exist_ok=True)
             return cls(name, str(dest), original_path=original_path, mode=mode)
         else:
-            # Local mode: work directly on the original path, no copying
+            # Local / VM mode: work directly on the original path, no copying
             return cls(name, original_path, original_path=original_path, mode=mode)
 
     @classmethod
@@ -60,6 +60,8 @@ class ThetaCode:
         self._project = project
         if self._mode == 'local' and self._backend is None:
             self._backend = LocalExecutor(project.name, project.original_path or project.path)
+        elif self._mode == 'vm' and self._backend is None:
+            self._backend = LocalExecutor(project.name, project.original_path or project.path, no_remap=True)
 
     def start(self, recreate_venvs: bool = True):
         if not self._project:
@@ -230,11 +232,16 @@ class Chat:
     def _set_system_message(self, llm: LLM):
         if self._project.mode == 'local':
             prompt_name = 'system_default_local'
+        elif self._project.mode == 'vm':
+            prompt_name = 'system_default_vm'
         else:
             prompt_name = 'system_default'
+        content = load_prompt(prompt_name).replace('%%project_name%%', self._project.name)
+        if self._project.mode == 'vm':
+            content = content.replace('%%project_path%%', self._project.original_path or self._project.path)
         self._conversation[0] = {
             'role': 'system',
-            'content': load_prompt(prompt_name).replace('%%project_name%%', self._project.name),
+            'content': content,
         }
 
     def send_message(

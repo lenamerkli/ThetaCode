@@ -111,12 +111,18 @@ class Storage:
             conn.commit()
             return cur.lastrowid
 
-    def get_projects(self) -> list[dict]:
-        """Return all projects ordered by creation time."""
+    def get_projects(self, mode_filter: str | None = None) -> list[dict]:
+        """Return all projects ordered by creation time, optionally filtered by mode."""
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT id, name, path, original_path, mode, created_at FROM projects ORDER BY created_at"
-            ).fetchall()
+            if mode_filter:
+                rows = conn.execute(
+                    "SELECT id, name, path, original_path, mode, created_at FROM projects WHERE mode = ? ORDER BY created_at",
+                    (mode_filter,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, name, path, original_path, mode, created_at FROM projects ORDER BY created_at"
+                ).fetchall()
         return [dict(r) for r in rows]
 
     def get_project(self, project_id: int) -> dict | None:
