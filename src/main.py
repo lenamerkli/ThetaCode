@@ -380,23 +380,6 @@ class Chat:
             tool_name = options.split('<tool_name>', 1)[-1].split('</tool_name>', 1)[0].strip()
 
             if tool_name == 'ask_user':
-                # Extract the question and return; the GUI will feed back the
-                # user's answer as the next send_message call.
-                question = self._parse_tool_param(options, 'question', content)
-                # Add a synthetic assistant message so the UI shows the question.
-                ask_entry = {
-                    'role': 'assistant',
-                    'content': question,
-                    'thinking': '',
-                    'cost': 0.0,
-                    'llm': llm.model,
-                    '_ask_user': True,
-                }
-                # Replace the raw tool_call message with the question text so
-                # the conversation looks cleaner when restored.
-                self._conversation[-1] = ask_entry
-                if on_new_message:
-                    on_new_message(ask_entry)
                 return Chat.WAITING_FOR_USER
 
             # Execute the tool.
