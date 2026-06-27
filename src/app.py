@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from storage import Storage                        # noqa: E402
 from main import Project, ThetaCode, Chat          # noqa: E402
-from llm import get_llm                            # noqa: E402
+from llm import get_llm, load_prompt               # noqa: E402
 from merge import detect_changes, apply_changes, GitignoreMatcher, make_diff  # noqa: E402
 from local_executor import RESOURCES_DIR, RESOURCES_VENV  # noqa: E402
 
@@ -1522,7 +1522,26 @@ class ThetaCodeApp:
             return
         cid = chat_data["id"]
         messages = self.storage.get_messages(cid)
-        json_str = json.dumps(messages, indent=2, ensure_ascii=False)
+
+        # Build the system prompt to match what the LLM actually receives
+        project_id = chat_data.get("project_id") or self.project_id
+        if project_id:
+            proj_row = self.storage.get_project(project_id)
+            if proj_row:
+                mode = proj_row.get("mode", "docker")
+                name = proj_row.get("name", "")
+                if mode == "local":
+                    prompt_name = "system_default_local"
+                elif mode == "vm":
+                    prompt_name = "system_default_vm"
+                else:
+                    prompt_name = "system_default"
+                content = load_prompt(prompt_name).replace("%%project_name%%", name)
+                if mode == "vm":
+                    content = content.replace("%%project_path%%", proj_row.get("original_path", ""))
+                messages.insert(0, {"role": "system", "content": content})
+
+        json_str = json.dumps(messages, indent=2, ensure_ascii=True)
         self.root.clipboard_clear()
         self.root.clipboard_append(json_str)
         prev = self._docker_label.cget("text")
