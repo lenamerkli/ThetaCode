@@ -150,57 +150,79 @@ class OpenRouterLLM(LLM):
         full_thinking = ""
         total_cost = 0.0
 
+        buffer = bytearray()
+        stream_finished = False
         try:
-            for line in response.iter_lines(decode_unicode=True):
-                # Check for cancellation on each line
+            for chunk_bytes in response.iter_content(chunk_size=1024):
+                # Check for cancellation on each chunk
                 if cancel_event and cancel_event.is_set():
                     print("\n[Stream cancelled by user]")
                     break
 
-                if not line:
-                    continue
+                if chunk_bytes:
+                    buffer.extend(chunk_bytes)
 
-                # Skip SSE comments (e.g. ": OPENROUTER PROCESSING")
-                if line.startswith(':'):
-                    continue
-
-                if not line.startswith('data: '):
-                    continue
-
-                data_str = line[6:]
-                if data_str == '[DONE]':
-                    break
-
-                try:
-                    chunk = json.loads(data_str)
-
-                    # Check for mid-stream error
-                    if 'error' in chunk:
-                        print(f"Stream error: {chunk['error'].get('message', 'unknown error')}")
+                # Process all complete lines from the buffer
+                while True:
+                    nl_idx = buffer.find(b'\n')
+                    if nl_idx == -1:
                         break
 
-                    delta = chunk.get('choices', [{}])[0].get('delta', {})
+                    line_bytes = buffer[:nl_idx]
+                    del buffer[:nl_idx + 1]
 
-                    # Accumulate content and thinking
-                    content = delta.get('content', '') or ''
-                    thinking = delta.get('reasoning', '') or ''
+                    # Decode the complete line (safe — no split multi-byte chars)
+                    line = line_bytes.decode('utf-8').rstrip('\r')
 
-                    if content:
-                        full_content += content
-                        print(content, end="", flush=True)
-                        on_token(content)
+                    if not line:
+                        continue
 
-                    if thinking:
-                        full_thinking += thinking
+                    # Skip SSE comments (e.g. ": OPENROUTER PROCESSING")
+                    if line.startswith(':'):
+                        continue
 
-                    # Grab usage/cost from any chunk that includes it
-                    usage = chunk.get('usage', {}) or {}
-                    if 'cost' in usage:
-                        total_cost = usage['cost']
+                    if not line.startswith('data: '):
+                        continue
 
-                except json.JSONDecodeError:
-                    # Ignore malformed JSON chunks
-                    pass
+                    data_str = line[6:]
+                    if data_str == '[DONE]':
+                        stream_finished = True
+                        break
+
+                    try:
+                        chunk = json.loads(data_str)
+
+                        # Check for mid-stream error
+                        if 'error' in chunk:
+                            print(f"Stream error: {chunk['error'].get('message', 'unknown error')}")
+                            stream_finished = True
+                            break
+
+                        delta = chunk.get('choices', [{}])[0].get('delta', {})
+
+                        # Accumulate content and thinking
+                        content = delta.get('content', '') or ''
+                        thinking = delta.get('reasoning', '') or ''
+
+                        if content:
+                            full_content += content
+                            print(content, end="", flush=True)
+                            on_token(content)
+
+                        if thinking:
+                            full_thinking += thinking
+
+                        # Grab usage/cost from any chunk that includes it
+                        usage = chunk.get('usage', {}) or {}
+                        if 'cost' in usage:
+                            total_cost = usage['cost']
+
+                    except json.JSONDecodeError:
+                        # Ignore malformed JSON chunks
+                        pass
+
+                if stream_finished:
+                    break
         finally:
             response.close()
 
