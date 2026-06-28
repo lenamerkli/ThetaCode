@@ -314,7 +314,7 @@ class Chat:
         ``cancel_event``, when set, aborts streaming requests and exits the loop.
         """
 
-        MAX_ITERATIONS = 50  # safety guard against infinite loops
+        MAX_ITERATIONS = 200  # safety guard against infinite loops
         iters = 0
 
         while iters < MAX_ITERATIONS:
