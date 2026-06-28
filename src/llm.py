@@ -228,6 +228,9 @@ class OpenRouterLLM(LLM):
 
         print('=' * 30 + ' End OpenRouter Streaming Response ' + '=' * 30)
 
+        if model_name.startswith('deepseek'):
+            full_content = full_content.replace('tool_call_name>', 'tool_name>')
+
         return {
             "text": full_content,
             "cost": total_cost,
