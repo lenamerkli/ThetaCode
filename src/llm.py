@@ -7,6 +7,12 @@ import json
 import typing as t
 from importlib.util import find_spec
 
+# App attribution for OpenRouter — these headers identify ThetaCode in
+# OpenRouter's public rankings and analytics.
+_APP_HTTP_REFERER = "https://github.com/lenamerkli/ThetaCode"
+_APP_TITLE = "ThetaCode"
+_APP_CATEGORIES = "cli-agent,programming-app"
+
 
 T_CONVERSATION = t.List[t.Dict[str, str]]
 T_COMPLETION = t.Dict[str, t.Union[str, int, float]]
@@ -41,6 +47,16 @@ class OpenRouterLLM(LLM):
     def __init__(self, model: str, headroom_enabled: bool = False):
         self.model = model
         self.headroom_enabled = headroom_enabled
+
+    @staticmethod
+    def _attribution_headers() -> dict:
+        """Build the optional OpenRouter app-attribution headers."""
+        headers = {"HTTP-Referer": _APP_HTTP_REFERER}
+        if _APP_TITLE:
+            headers["X-OpenRouter-Title"] = _APP_TITLE
+        if _APP_CATEGORIES:
+            headers["X-OpenRouter-Categories"] = _APP_CATEGORIES
+        return headers
 
     def _compress_conversation(self, conversation: T_CONVERSATION) -> T_CONVERSATION:
         """Compress the conversation using headroom if available and enabled."""
@@ -77,13 +93,15 @@ class OpenRouterLLM(LLM):
         print('=' * 30 + ' Begin OpenRouter Request ' + '=' * 30)
         print(data)
         print('=' * 30 + ' End OpenRouter Request ' + '=' * 30)
+        request_headers = {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + environ['OPENROUTER_API_KEY'],
+        }
+        request_headers.update(self._attribution_headers())
         response = request(
             method='POST',
             url='https://openrouter.ai/api/v1/chat/completions',
-            headers={
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer ' + environ['OPENROUTER_API_KEY'],
-            },
+            headers=request_headers,
             json=data,
             verify='/etc/pki/tls/certs/ca-bundle.crt',
         )
@@ -130,13 +148,15 @@ class OpenRouterLLM(LLM):
         print({'model': model_name, 'messages': f'[{len(conversation)} messages]', 'stream': True})
         print('=' * 30 + ' End OpenRouter Streaming Request ' + '=' * 30)
 
+        stream_request_headers = {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + environ['OPENROUTER_API_KEY'],
+        }
+        stream_request_headers.update(self._attribution_headers())
         response = request(
             method='POST',
             url='https://openrouter.ai/api/v1/chat/completions',
-            headers={
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer ' + environ['OPENROUTER_API_KEY'],
-            },
+            headers=stream_request_headers,
             json=data,
             verify='/etc/pki/tls/certs/ca-bundle.crt',
             stream=True,
