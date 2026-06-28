@@ -528,7 +528,7 @@ class Chat:
         end = min(len(content), end)
         sliced = content[start:end] if start < end else ''
         sliced = self._truncate(sliced, max_chars)
-        return f"<path>{path}</path>\n<file_contents>\n{sliced}\n</file_contents>"
+        return f"<path>{path}</path>\n<note>Read {len(sliced)} of {len(content)} characters and {len(sliced.split('\n'))} of {len(content.split('\n'))} lines.</note>\n<file_contents>\n{sliced}\n</file_contents>"
 
     def _tool_write_to_file(self, path: str, content: str) -> str:
         if not path:
@@ -536,7 +536,7 @@ class Chat:
         result = self._theta_code.write_to_file(path, content)
         if 'error' in result:
             return f'Error: {result["error"]}'
-        return 'File written successfully'
+        return f"{result['characters']} characters written to `{path}`."
 
     def _tool_replace_in_file(self, path: str, search: str, replace: str) -> str:
         if not path:
@@ -546,7 +546,9 @@ class Chat:
         result = self._theta_code.replace_in_file(path, search, replace)
         if 'error' in result:
             return f'Error: {result["error"]}'
-        return 'File replaced successfully'
+        if result['replacements'] < 1:
+            return 'Nothing was replaced in `{path}`.'
+        return f"{result['replacements']} occurrences replaced in `{path}`."
 
     def _tool_bash(self, command: str, timeout: int = 60, directory: str = '/home/agent/',
                    venv: str = '', max_chars: int = 100000) -> str:

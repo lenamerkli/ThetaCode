@@ -83,7 +83,7 @@ def write_to_file():
         path = Path(path_str)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding='utf-8')
-        return {'ok': True}
+        return {'characters': len(content)}
     except ValueError as e:
         return {'error': str(e)}, 400
     except Exception as e:
@@ -109,9 +109,10 @@ def replace_in_file():
         current_content = path.read_text(encoding='utf-8')
         if search not in current_content:
             return {'error': 'Search text not found in file'}, 400
-        new_content = current_content.replace(search, replace, 1)
+        replacements = current_content.count(search)
+        new_content = current_content.replace(search, replace)
         path.write_text(new_content, encoding='utf-8')
-        return {'ok': True}
+        return {'replacements': replacements}
     except ValueError as e:
         return {'error': str(e)}, 400
     except Exception as e:

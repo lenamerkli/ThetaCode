@@ -308,7 +308,7 @@ class LocalExecutor:
             p = Path(local_path)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding='utf-8')
-            return {'ok': True}
+            return {'characters': len(content)}
         except Exception as e:
             return {'error': str(e)}
 
@@ -324,9 +324,10 @@ class LocalExecutor:
             current = p.read_text(encoding='utf-8')
             if search not in current:
                 return {'error': 'Search text not found in file'}
-            new_content = current.replace(search, replace, 1)
+            replacements = current.count(search)
+            new_content = current.replace(search, replace)
             p.write_text(new_content, encoding='utf-8')
-            return {'ok': True}
+            return {'replacements': replacements}
         except Exception as e:
             return {'error': str(e)}
 
