@@ -96,7 +96,9 @@ class OpenRouterLLM(LLM):
             model_name = model_name[1:]
         data = {
             'model': model_name,
-            'messages': conversation
+            'messages': conversation,
+            'stop': ['</tool_call>'],
+            'provider': {'sort': 'price'},
         }
         print('=' * 30 + ' Begin OpenRouter Request ' + '=' * 30)
         print(data)
@@ -120,9 +122,12 @@ class OpenRouterLLM(LLM):
         print(response_json)
         print('=' * 30 + ' End OpenRouter Response ' + '=' * 30)
         message = response_json["choices"][0]["message"]
-        message['content'] = self._fix_specific_responses(self.model, message.get('content', ''))
+        message['content'] = message.get('content', '')
+        if '<tool_call>' in message['content']:
+            message['content'] += '</tool_call>'
+        message['content'] = self._fix_specific_responses(self.model, message['content'])
         return {
-            'text': message.get('content') or '',
+            'text': message['content'],
             'cost': response_json.get('usage', {}).get('cost', 0.0),
             'thinking': message.get('reasoning', ''),
         }
@@ -148,11 +153,15 @@ class OpenRouterLLM(LLM):
         model_name = self.model.replace('OpenRouter', '').replace('openrouter', '')
         if model_name[0] == '/':
             model_name = model_name[1:]
-        data = {
+        data: dict[str, t.Any] = {
             'model': model_name,
             'messages': conversation,
             'stream': True,
+            'stop': ['</tool_call>'],
+            'provider': {'sort': 'price'},
         }
+        if model_name == 'z-ai/glm-5.2':
+            data['stop'].append('</invoke>')
         print('=' * 30 + ' Begin OpenRouter Streaming Request ' + '=' * 30)
         print({'model': model_name, 'messages': f'[{len(conversation)} messages]', 'stream': True})
         print('=' * 30 + ' End OpenRouter Streaming Request ' + '=' * 30)
@@ -256,6 +265,8 @@ class OpenRouterLLM(LLM):
             response.close()
 
         print('\n' + '=' * 30 + ' End OpenRouter Streaming Response ' + '=' * 30)
+        if '<tool_call>' in full_content:
+            full_content += '</tool_call>'
         full_content = self._fix_specific_responses(model_name, full_content)
         return {
             "text": full_content,
