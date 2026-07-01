@@ -367,7 +367,7 @@ class Chat:
                 # ----
                 return content  # final natural-language answer
 
-            options = content.split('<tool_call>', 1)[-1].split('</tool_call>', 1)[0].strip()
+            options = content.split('<tool_call>', 1)[-1].rsplit('</tool_call>', 1)[0].strip()
 
             if '<tool_name>' not in content or '</tool_name>' not in options:
                 # Malformed tool call
@@ -377,7 +377,7 @@ class Chat:
                     on_new_message(err_entry)
                 continue
 
-            tool_name = options.split('<tool_name>', 1)[-1].split('</tool_name>', 1)[0].strip()
+            tool_name = options.split('<tool_name>', 1)[-1].rsplit('</tool_name>', 1)[0].strip()
 
             if tool_name == 'ask_user':
                 return Chat.WAITING_FOR_USER
@@ -473,7 +473,7 @@ class Chat:
         open_tag = f'<{param_name}>'
         close_tag = f'</{param_name}>'
         if open_tag in options and close_tag in options:
-            return options.split(open_tag, 1)[-1].split(close_tag, 1)[0].strip()
+            return options.split(open_tag, 1)[-1].rsplit(close_tag, 1)[0].strip()
         return default_value
 
     @staticmethod

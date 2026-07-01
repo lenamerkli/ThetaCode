@@ -62,8 +62,18 @@ class OpenRouterLLM(LLM):
     def _fix_specific_responses(model_name: str, message: str) -> str:
         if model_name.startswith('deepseek'):
             message = message.replace('tool_call_name>', 'tool_name>')
+        if (model_name == 'z-ai/glm-5.2') and ('</tool_name>' not in message):
+            message = message.replace('<tool_call>bash', '<tool_call>\n<tool_name>bash</tool_name>')
         if (model_name == 'z-ai/glm-5.2') and ('<tool_name>bash</tool_name>' in message):
-            message = message.replace('</arg_value>', '</command>').replace('<tool_call>bash<tool_name>', '<tool_call><tool_name>')
+            message = message.replace('<tool_call>bash<tool_name>', '<tool_call><tool_name>')
+            if '</command>' in message:
+                message = message.replace('</arg_value>', '')
+            else:
+                message = message.replace('</arg_value>', '</command>')
+            if '<command>' not in message:
+                message = message.replace('<arg_key>', '<command>')
+            else:
+                message = message.replace('<arg_key>', '')
         return message
 
     def _compress_conversation(self, conversation: T_CONVERSATION) -> T_CONVERSATION:
@@ -123,9 +133,9 @@ class OpenRouterLLM(LLM):
         print('=' * 30 + ' End OpenRouter Response ' + '=' * 30)
         message = response_json["choices"][0]["message"]
         message['content'] = message.get('content', '')
-        if '<tool_call>' in message['content']:
+        if ('<tool_call>' in message['content']) and ('</tool_call>' not in message['content']):
             message['content'] += '</tool_call>'
-        message['content'] = self._fix_specific_responses(self.model, message['content'])
+        message['content'] = self._fix_specific_responses(self.model, message['content']).replace('</tool_call></tool_call>', '</tool_call>')
         return {
             'text': message['content'],
             'cost': response_json.get('usage', {}).get('cost', 0.0),
@@ -265,9 +275,9 @@ class OpenRouterLLM(LLM):
             response.close()
 
         print('\n' + '=' * 30 + ' End OpenRouter Streaming Response ' + '=' * 30)
-        if '<tool_call>' in full_content:
+        if ('<tool_call>' in full_content) and ('</tool_call>' not in full_content):
             full_content += '</tool_call>'
-        full_content = self._fix_specific_responses(model_name, full_content)
+        full_content = self._fix_specific_responses(model_name, full_content).replace('</tool_call></tool_call>', '</tool_call>')
         return {
             "text": full_content,
             "cost": total_cost,
