@@ -1,4 +1,4 @@
-The tool call you tried to make is unable to be parsed. Tool calling is explained in the system message at the start of the conversation. Review this parser to understand the exact format required:
+The tool call you tried to make is unable to be parsed. You must use one and only one tool call at a time and then end your turn of the conversation. You must include the <tool_call> XML tags. Tool calling is explained in the system message at the start of the conversation. If you want to interact with the user, use the `ask_user` tool. Review this parser to understand the exact format required:
 ```python
 def _parse_tool_param(options: str, param_name: str, default_value: str = '') -> str:
     open_tag = f'<{param_name}>'
