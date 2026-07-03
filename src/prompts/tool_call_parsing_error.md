@@ -34,6 +34,9 @@ match tool_name:
         venv      = _parse_tool_param(options, 'venv')
         max_chars = int(_parse_tool_param(options, 'max_chars', '100000') or '100000')
         return _tool_bash(command, timeout, directory, venv, max_chars)
+    case 'ask_user':
+        question = _parse_tool_param(options, 'question')
+        return _tool_ask_user(question)
     case _:
         return f'Unknown tool: {tool_name}'
 ```

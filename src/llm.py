@@ -61,19 +61,37 @@ class OpenRouterLLM(LLM):
     @staticmethod
     def _fix_specific_responses(model_name: str, message: str) -> str:
         if model_name.startswith('deepseek'):
-            message = message.replace('tool_call_name>', 'tool_name>')
-        if (model_name == 'z-ai/glm-5.2') and ('</tool_name>' not in message):
-            message = message.replace('<tool_call>bash', '<tool_call>\n<tool_name>bash</tool_name>')
-        if (model_name == 'z-ai/glm-5.2') and ('<tool_name>bash</tool_name>' in message):
-            message = message.replace('<tool_call>bash<tool_name>', '<tool_call><tool_name>')
-            if '</command>' in message:
-                message = message.replace('</arg_value>', '')
-            else:
-                message = message.replace('</arg_value>', '</command>')
-            if '<command>' not in message:
-                message = message.replace('<arg_key>', '<command>')
-            else:
-                message = message.replace('<arg_key>', '')
+            for old, new in (
+                ('tool_call_name>', 'tool_name>'),
+                ('tool_caller_id>', 'tool_call>'),
+                ('tool_calls>', 'tool_call>'),
+            ):
+                message = message.replace(old, new)
+            if '<tool_call name="' in message:
+                for old, new in (
+                    ('<tool_call name="', '<tool_call>\n<tool_name>'),
+                    ('">', '</tool_name>')
+                ):
+                    message.replace(old, new, 1)
+        elif model_name == 'z-ai/glm-5.2':
+            if '</tool_name>' not in message:
+                message = message.replace(
+                    '<tool_call>bash',
+                    '<tool_call>\n<tool_name>bash</tool_name>',
+                )
+            if '<tool_name>bash</tool_name>' in message:
+                message = message.replace(
+                    '<tool_call>bash<tool_name>',
+                    '<tool_call><tool_name>',
+                )
+                message = message.replace(
+                    '</arg_value>',
+                    '' if '</command>' in message else '</command>',
+                )
+                message = message.replace(
+                    '<arg_key>',
+                    '' if '<command>' in message else '<command>',
+                )
         return message
 
     def _compress_conversation(self, conversation: T_CONVERSATION) -> T_CONVERSATION:

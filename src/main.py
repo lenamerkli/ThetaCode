@@ -353,19 +353,11 @@ class Chat:
             # Last message is from the assistant – check for a tool call.
             content = last['content']
             if '<tool_call>' not in content or '</tool_call>' not in content:
-                # No tool call → finished; also send "no tool call" prompt for
-                # the next human turn.  But first check if the LLM simply gave
-                # a clean final answer (no tool tags at all).
-                # We treat a message without any tool tags as the final answer.
-                # (If you want to enforce tool use, uncomment the block below.)
-                # ----
-                # no_tool_entry = {'role': 'user', 'content': load_prompt('no_tool_call')}
-                # self._conversation.append(no_tool_entry)
-                # if on_new_message:
-                #     on_new_message(no_tool_entry)
-                # continue
-                # ----
-                return content  # final natural-language answer
+                no_tool_entry = {'role': 'user', 'content': load_prompt('tool_call_parsing_error')}
+                self._conversation.append(no_tool_entry)
+                if on_new_message:
+                    on_new_message(no_tool_entry)
+                continue
 
             options = content.split('<tool_call>', 1)[-1].rsplit('</tool_call>', 1)[0].strip()
 
