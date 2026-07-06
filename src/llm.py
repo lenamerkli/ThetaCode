@@ -74,6 +74,7 @@ class OpenRouterLLM(LLM):
                 ):
                     message.replace(old, new, 1)
         elif model_name == 'z-ai/glm-5.2':
+            message = message.replace('</parameter>', '</tool_call>')
             if '</tool_name>' not in message:
                 message = message.replace(
                     '<tool_call>bash',
@@ -189,7 +190,7 @@ class OpenRouterLLM(LLM):
             'provider': {'sort': 'price'},
         }
         if model_name == 'z-ai/glm-5.2':
-            data['stop'].append('</invoke>')
+            data['stop'].extend(['</invoke>', '</parameter>'])
         print('=' * 30 + ' Begin OpenRouter Streaming Request ' + '=' * 30)
         print({'model': model_name, 'messages': f'[{len(conversation)} messages]', 'stream': True})
         print('=' * 30 + ' End OpenRouter Streaming Request ' + '=' * 30)
