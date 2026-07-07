@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Allow Python version to be overridden via environment variable
-PYTHON_VERSION="/usr/bin/python3"
-PYTHON_SCRIPT="/opt/thetacode/search_the_web.py"
+THETACODE_PYTHON_VERSION="${THETACODE_PYTHON_VERSION:-/usr/bin/python3}"
+THETACODE_PYTHON_SCRIPT="/opt/thetacode/search_the_web.py"
 
 # Execute
-"$PYTHON_VERSION" "$PYTHON_SCRIPT" "$@"
+"$THETACODE_PYTHON_VERSION" "$THETACODE_PYTHON_SCRIPT" "$@"

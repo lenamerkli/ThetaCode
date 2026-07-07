@@ -265,6 +265,10 @@ class LocalExecutor:
                 text=True,
                 timeout=timeout,
                 cwd=local_cwd,
+                env={
+                    'THETACODE_PYTHON_VERSION': str(RESOURCES_VENV_PYTHON),
+                    'BRAVE_API_KEY': os.environ.get('BRAVE_API_KEY', ''),
+                },
             )
             return {
                 'stdout': result.stdout,
