@@ -190,7 +190,7 @@ class OpenRouterLLM(LLM):
             'provider': {'sort': 'price'},
         }
         if model_name == 'z-ai/glm-5.2':
-            data['stop'].extend(['</invoke>', '</parameter>'])
+            data['stop'].extend(['</invoke>', '</parameter>', '<parameter'])
         print('=' * 30 + ' Begin OpenRouter Streaming Request ' + '=' * 30)
         print({'model': model_name, 'messages': f'[{len(conversation)} messages]', 'stream': True})
         print('=' * 30 + ' End OpenRouter Streaming Request ' + '=' * 30)
