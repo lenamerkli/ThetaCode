@@ -76,6 +76,14 @@ def _ensure_vm_resources() -> None:
     for d in vm_dirs:
         d.mkdir(parents=True, exist_ok=True)
 
+    # Ensure the resources venv exists (software wrappers depend on it)
+    if not RESOURCES_VENV.is_dir():
+        subprocess.run(
+            ['python3', '-m', 'venv', str(RESOURCES_VENV)],
+            check=True,
+        )
+        _install_resources_packages()
+
     # Write software wrapper scripts into ~/software/
     src_software_dir = Path(__file__).parent / 'docker' / 'software'
     for script_name in ['search_the_web', 'webpage_to_markdown']:
@@ -257,18 +265,23 @@ class LocalExecutor:
         if venv_prefix:
             full_command = venv_prefix + command
 
+        # Build an environment that inherits the full host environment
+        # (mirroring how Docker containers inherit the container's env),
+        # then layer ThetaCode-specific variables on top.
+        full_env = os.environ.copy()
+        full_env['THETACODE_PYTHON_VERSION'] = str(RESOURCES_VENV_PYTHON)
+        full_env['BRAVE_API_KEY'] = os.environ.get('BRAVE_API_KEY', '')
+
         try:
             result = subprocess.run(
                 full_command,
                 shell=True,
+                executable='/bin/bash',
                 capture_output=True,
                 text=True,
                 timeout=timeout,
                 cwd=local_cwd,
-                env={
-                    'THETACODE_PYTHON_VERSION': str(RESOURCES_VENV_PYTHON),
-                    'BRAVE_API_KEY': os.environ.get('BRAVE_API_KEY', ''),
-                },
+                env=full_env,
             )
             return {
                 'stdout': result.stdout,

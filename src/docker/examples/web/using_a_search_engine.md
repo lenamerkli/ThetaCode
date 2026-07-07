@@ -1,7 +1,7 @@
 The websearch software uses the Brave Search API and returns results in a readable text format.
 <tool_call>
 <tool_name>bash</tool_name>
-<command>/home/agent/software/search_the_web "requests.Session.auth" > websearch_requests_session_auth.txt && head -n 15 websearch_requests_session_auth.txt</command>
+<command>/home/agent/software/search_the_web "requests.Session.auth" > websearch_requests_session_auth.txt && head -n 12 websearch_requests_session_auth.txt</command>
 <directory>/home/agent/tmp/</directory>
 </tool_call>
 <tool_response>
@@ -18,6 +18,7 @@ The command above will return an output like this:
 3. Session Objects - Python requests - GeeksforGeeks
    URL:     https://www.geeksforgeeks.org/python/session-objects-python-requests/
    Snippet: A session object all the methods as of requests. Using Session Objects Let us illustrate the use of session objects by setting a cookie to a URL and then making a request again to check if the cookie is set.
+
 </stdout>
 <returncode>0</returncode>
 </tool_response>
