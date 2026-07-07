@@ -429,6 +429,8 @@ class Chat:
 
         match tool_name:
             case 'read_file':
+                if not (error_message := self._has_parameters(options, ['path'])):
+                    return error_message
                 path = self._parse_tool_param(options, 'path')
                 start_line = int(self._parse_tool_param(options, 'start_line', '1') or '1')
                 end_line = int(self._parse_tool_param(options, 'end_line', '1000') or '1000')
@@ -437,15 +439,21 @@ class Chat:
                 max_chars = int(self._parse_tool_param(options, 'max_chars', '1000000') or '1000000')
                 return self._tool_read_file(path, start_line, end_line, start_char, end_char, max_chars)
             case 'write_to_file':
+                if not (error_message := self._has_parameters(options, ['path', 'content'])):
+                    return error_message
                 path = self._parse_tool_param(options, 'path')
                 content = self._parse_tool_param(options, 'content')
                 return self._tool_write_to_file(path, content)
             case 'replace_in_file':
+                if not (error_message := self._has_parameters(options, ['path', 'search', 'replace'])):
+                    return error_message
                 path = self._parse_tool_param(options, 'path')
                 search = self._parse_tool_param(options, 'search')
                 replace = self._parse_tool_param(options, 'replace')
                 return self._tool_replace_in_file(path, search, replace)
             case 'bash':
+                if not (error_message := self._has_parameters(options, ['command'])):
+                    return error_message
                 command = self._parse_tool_param(options, 'command')
                 timeout = int(self._parse_tool_param(options, 'timeout', '60') or '60')
                 directory = self._parse_tool_param(options, 'directory', '/home/agent/')
@@ -458,6 +466,13 @@ class Chat:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _has_parameters(options, parameters):
+        for param in parameters:
+            if (f"<{param}>" not in options) or (f"</{param}>" not in options):
+                return f"Missing required parameter: <{param}> ... </{param}>"
+        return ''
 
     @staticmethod
     def _parse_tool_param(options: str, param_name: str, default_value: str = '') -> str:
