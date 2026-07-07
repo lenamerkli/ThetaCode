@@ -25,8 +25,6 @@ RESOURCES_VENV_ACTIVATE = RESOURCES_VENV / 'bin' / 'activate'
 REQUIRED_PACKAGES = [
     'flask',
     'requests',
-    'beautifulsoup4',
-    'curl_cffi',
     'crawl4ai',
     'playwright',
 ]

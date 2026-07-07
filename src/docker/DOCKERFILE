@@ -3,7 +3,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y vim curl wget git
 RUN wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor | tee /etc/apt/trusted.gpg.d/adoptium.gpg > /dev/null
 RUN echo "deb https://packages.adoptium.net/artifactory/deb $(awk -F= '/^VERSION_CODENAME/{print$2}' /etc/os-release) main" | tee /etc/apt/sources.list.d/adoptium.list
 RUN apt-get update && apt-get install -y temurin-25-jdk temurin-21-jdk temurin-17-jdk && apt-get clean && rm -rf /var/lib/apt/lists/*
-RUN pip3 install --break-system-packages --no-cache-dir flask requests beautifulsoup4 curl-cffi crawl4ai
+RUN pip3 install --break-system-packages --no-cache-dir flask requests crawl4ai
 RUN pip3 install --break-system-packages --no-cache-dir playwright && python3 -m playwright install chromium && python3 -m playwright install-deps chromium
 RUN mkdir -p /home/agent/tools /home/agent/examples /opt /opt/jetbrains_gateway /home/agent/software /home/agent/tmp
 RUN echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config && mkdir -p /run/sshd

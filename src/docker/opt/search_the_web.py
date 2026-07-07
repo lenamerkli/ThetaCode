@@ -1,135 +1,105 @@
 #!/usr/bin/env python3
 """
+Search the web using the Brave Search API.
+
 Usage examples:
-  python searxng_search.py "query"
-  python searxng_search.py "query" --json -o results.json
-  python searxng_search.py "query" --csv --infobox
-  python searxng_search.py "query" --pageno 2 --safesearch 0
+  python search_the_web.py "query"
+  python search_the_web.py "query" --json -o results.json
+  python search_the_web.py "query" --csv
+  python search_the_web.py "query" --pageno 2 --safesearch 1
+
+API key must be set in the BRAVE_API_KEY environment variable.
 """
 
 import argparse
 import csv
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
-from bs4 import BeautifulSoup
-from curl_cffi import requests
+import requests
 
-BASE_URL = "https://search.ctq.ro/searxng/search"
-RESULT_SELECTOR = "article.result"
-URL_SELECTOR = "a.url_header"
-TITLE_SELECTOR = "h3 a"
-CONTENT_SELECTOR = "p.content"
-ENGINES_SELECTOR = "div.engines > span"
-
-
-def parse_results(html: str) -> list[dict[str, Any]]:
-    """Parse the HTML and return a list of result dicts."""
-    soup = BeautifulSoup(html, "html.parser")
-    results: list[dict[str, Any]] = []
-    for article in soup.select(RESULT_SELECTOR):
-        url_tag = article.select_one(URL_SELECTOR)
-        title_tag = article.select_one(TITLE_SELECTOR)
-        content_tag = article.select_one(CONTENT_SELECTOR)
-        engine_tags = article.select(ENGINES_SELECTOR)
-
-        url = url_tag["href"].strip() if url_tag and url_tag.has_attr("href") else None
-        title = title_tag.get_text(strip=True) if title_tag else None
-        if content_tag and "empty_element" not in (content_tag.get("class") or []):
-            content = content_tag.get_text(" ", strip=True)
-        else:
-            content = ""
-        engines = [tag.get_text(strip=True) for tag in engine_tags if tag.get_text(strip=True)]
-
-        results.append({
-            "url": url,
-            "title": title,
-            "content": content,
-            "engines": engines,
-        })
-    return results
-
-
-def extract_infos(html: str) -> list[dict[str, Any]]:
-    """Extract the sidebar infobox (e.g. Wikipedia-style info box)."""
-    soup = BeautifulSoup(html, "html.parser")
-    boxes: list[dict[str, Any]] = []
-    for box in soup.select("aside.infobox"):
-        title_tag = box.select_one("h2.title")
-        desc_tag = box.find("p")
-        attributes: dict[str, str] = {}
-        for dl in box.select("dl"):
-            dt = dl.find("dt")
-            dd = dl.find("dd")
-            if dt and dd:
-                key = dt.get_text(" ", strip=True).rstrip(" :")
-                attributes[key] = dd.get_text(" ", strip=True)
-        boxes.append({
-            "title": title_tag.get_text(" ", strip=True) if title_tag else "",
-            "description": desc_tag.get_text(" ", strip=True) if desc_tag else "",
-            "attributes": attributes,
-        })
-    return boxes
+BASE_URL = "https://api.search.brave.com/res/v1/web/search"
+COUNT = 20  # Brave max per page
+MAX_OFFSET = 9 * COUNT  # Brave limit: offset max 9 (0-indexed page)
 
 
 def search(
     query: str,
     language: str = "en",
     safesearch: str = "0",
-    category: str = "general",
     pageno: int = 1,
     time_range: str = "",
-) -> str:
-    """Perform a search request and return the HTML response."""
-    data = {
-        "q": query,
-        f"category_{category}": "1",
-        "language": language,
-        "time_range": time_range,
-        "safesearch": safesearch,
-        "theme": "simple",
-    }
-    if pageno > 1:
-        data["pageno"] = str(pageno)
+) -> dict[str, Any]:
+    """Perform a Brave Web Search request and return the JSON response."""
+    api_key = os.environ.get("BRAVE_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "BRAVE_API_KEY environment variable is not set. "
+            "Get a key at https://brave.com/search/api/"
+        )
 
-    cookie_header = (
-        f"categories={category}; "
-        f"language=auto; "
-        f"locale=en; "
-        f"autocomplete=; "
-        f"favicon_resolver=; "
-        f"method=POST; "
-        f"safesearch={safesearch}; "
-        f"theme=simple; "
-        f"results_on_new_tab=0; "
-        f"doi_resolver=oadoi.org; "
-        f"simple_style=auto; "
-        f"center_alignment=0; "
-        f"query_in_title=0; "
-        f"search_on_category_select=1; "
-        f"hotkeys=default; "
-        f"url_formatting=pretty; "
-        f"disabled_engines=; "
-        f'enabled_engines="duckduckgo__general\\054qwant__general\\054yahoo__general\\054mojeek__general"; '
-        f"enabled_plugins=; "
-        f"tokens="
-    )
+    params: dict[str, str | int] = {
+        "q": query,
+        "count": COUNT,
+    }
+
+    # Language
+    if language:
+        params["search_lang"] = language
+
+    # SafeSearch mapping: 0=None, 1=Moderate, 2=Strict
+    safesearch_map = {"0": "off", "1": "moderate", "2": "strict"}
+    if safesearch in safesearch_map:
+        params["safesearch"] = safesearch_map[safesearch]
+
+    # Pagination (1-indexed → 0-indexed offset)
+    if pageno > 1:
+        offset = (pageno - 1) * COUNT
+        offset = min(offset, MAX_OFFSET)
+        params["offset"] = offset
+
+    # Freshness filtering
+    freshness_map = {
+        "day": "pd",
+        "week": "pw",
+        "month": "pm",
+        "year": "py",
+    }
+    if time_range and time_range in freshness_map:
+        params["freshness"] = freshness_map[time_range]
 
     headers = {
-        "Cookie": cookie_header,
-        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+        "X-Subscription-Token": api_key,
     }
 
-    response = requests.post(
-        BASE_URL,
-        data=data,
-        impersonate="chrome",
-        headers=headers,
-    )
+    response = requests.get(BASE_URL, params=params, headers=headers)
     response.raise_for_status()
-    return response.text
+    return response.json()
+
+
+def parse_results(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract search result items from the Brave API response."""
+    web = data.get("web", {})
+    raw_results: list[dict[str, Any]] = web.get("results", [])
+    results: list[dict[str, Any]] = []
+    for r in raw_results:
+        results.append({
+            "url": r.get("url", ""),
+            "title": r.get("title", ""),
+            "content": r.get("description", ""),
+            "age": r.get("age", ""),
+        })
+    return results
+
+
+def more_results_available(data: dict[str, Any]) -> bool:
+    """Check if more pages of results are available."""
+    return bool(data.get("web", {}).get("more_results_available", False))
 
 
 def write_json(data: Any, output: str | None) -> None:
@@ -149,7 +119,6 @@ def write_csv(results: list[dict[str, Any]], output: str | None) -> None:
         writer = csv.DictWriter(out_file, fieldnames=fieldnames)
         writer.writeheader()
         for row in results:
-            row = {**row, "engines": ", ".join(row.get("engines") or [])}
             writer.writerow(row)
     finally:
         if output:
@@ -161,8 +130,9 @@ def write_text(results: list[dict[str, Any]], output: str | None) -> None:
     for i, r in enumerate(results, 1):
         lines.append(f"{i}. {r['title']}")
         lines.append(f"   URL:     {r['url']}")
-        lines.append(f"   Engines: {', '.join(r['engines']) or '-'}")
-        if r["content"]:
+        if r.get("age"):
+            lines.append(f"   Age:     {r['age']}")
+        if r.get("content"):
             lines.append(f"   Snippet: {r['content']}")
         lines.append("")
     text = "\n".join(lines).rstrip() + "\n"
@@ -174,67 +144,72 @@ def write_text(results: list[dict[str, Any]], output: str | None) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Search using SearXNG and display results."
+        description="Search the web using the Brave Search API."
     )
     parser.add_argument("query", help="Search query")
-    parser.add_argument("-l", "--language", default="en", help="Language code (default: en)")
-    parser.add_argument("-s", "--safesearch", default="0", choices=["0", "1", "2"],
-                        help="SafeSearch: 0=None, 1=Moderate, 2=Strict")
-    parser.add_argument("-c", "--category", default="general",
-                        help="Search category (default: general)")
-    parser.add_argument("-p", "--pageno", type=int, default=1,
-                        help="Page number (default: 1)")
-    parser.add_argument("-t", "--time-range", default="",
-                        help="Time range (day, week, month, year)")
+    parser.add_argument(
+        "-l", "--language", default="en",
+        help="Language code (default: en)",
+    )
+    parser.add_argument(
+        "-s", "--safesearch", default="0",
+        choices=["0", "1", "2"],
+        help="SafeSearch: 0=None, 1=Moderate, 2=Strict",
+    )
+    parser.add_argument(
+        "-p", "--pageno", type=int, default=1,
+        help="Page number (default: 1)",
+    )
+    parser.add_argument(
+        "-t", "--time-range", default="",
+        choices=["day", "week", "month", "year"],
+        help="Time range filter",
+    )
+    # --category is accepted for backward compatibility but ignored
+    parser.add_argument(
+        "-c", "--category", default="general",
+        help="(ignored) Search category",
+    )
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("--csv", action="store_true", help="Output as CSV")
-    parser.add_argument("--text", action="store_true", help="Output as plain text")
-    parser.add_argument("--infobox", action="store_true",
-                        help="Include infobox data (only for JSON/text output)")
-    parser.add_argument("-o", "--output", help="Write output to file instead of stdout")
+    parser.add_argument("--text", action="store_true",
+                        help="Output as plain text (default)")
+    parser.add_argument(
+        "-o", "--output",
+        help="Write output to file instead of stdout",
+    )
     args = parser.parse_args()
+
     if not (args.json or args.csv):
         args.text = True
-    html = search(
-        query=args.query,
-        language=args.language,
-        safesearch=args.safesearch,
-        category=args.category,
-        pageno=args.pageno,
-        time_range=args.time_range,
-    )
-    results = parse_results(html)
+
+    try:
+        data = search(
+            query=args.query,
+            language=args.language,
+            safesearch=args.safesearch,
+            pageno=args.pageno,
+            time_range=args.time_range,
+        )
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except requests.RequestException as e:
+        print(f"Request error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    results = parse_results(data)
+
     if args.json:
-        data = {"results": results}
-        if args.infobox:
-            data["infobox"] = extract_infos(html)
-        write_json(data, args.output)
+        output_data: dict[str, Any] = {"results": results}
+        if more_results_available(data):
+            output_data["more_results_available"] = True
+            output_data["next_page"] = args.pageno + 1
+        write_json(output_data, args.output)
     elif args.csv:
-        if args.infobox:
-            print("Warning: --infobox ignored for CSV output.", file=sys.stderr)
         write_csv(results, args.output)
-    elif args.text:
-        lines = []
-        if args.infobox:
-            infos = extract_infos(html)
-            for box in infos:
-                lines.append(f"[Infobox] {box['title']}")
-                lines.append(f"  Description: {box['description']}")
-                for key, val in box["attributes"].items():
-                    lines.append(f"  {key}: {val}")
-                lines.append("")
-        for i, r in enumerate(results, 1):
-            lines.append(f"{i}. {r['title']}")
-            lines.append(f"   URL:     {r['url']}")
-            lines.append(f"   Engines: {', '.join(r['engines']) or '-'}")
-            if r["content"]:
-                lines.append(f"   Snippet: {r['content']}")
-            lines.append("")
-        text_output = "\n".join(lines).rstrip() + "\n"
-        if args.output:
-            Path(args.output).write_text(text_output, encoding="utf-8")
-        else:
-            print(text_output, end="")
+    else:  # --text (default)
+        write_text(results, args.output)
 
 
 if __name__ == "__main__":
