@@ -295,8 +295,26 @@ class Chat:
         return self._run_loop(llm, on_new_message, on_token=on_token, cancel_event=cancel_event)
 
     # ------------------------------------------------------------------
-    # Iterative agentic loop (replaces the old recursive _step)
+    # Resume / Iterative agentic loop
     # ------------------------------------------------------------------
+
+    def resume(
+        self,
+        llm: LLM,
+        on_new_message: t.Optional[T_MSG_CALLBACK] = None,
+        on_token: t.Optional[T_STREAM_CALLBACK] = None,
+        cancel_event: t.Optional[threading.Event] = None,
+    ) -> str:
+        """Resume the agentic loop from the current conversation state.
+
+        Does NOT append a new user message — it picks up wherever the
+        conversation left off: if the last message is from the assistant
+        (with a tool call), the tool is parsed and executed; if the last
+        message is from the user or a tool result, the LLM generates the
+        next assistant response.
+        """
+        self._set_system_message(llm)
+        return self._run_loop(llm, on_new_message, on_token=on_token, cancel_event=cancel_event)
 
     def _run_loop(
         self,

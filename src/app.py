@@ -337,6 +337,12 @@ class ThetaCodeApp:
                                    state=tk.DISABLED, padx=16, pady=4)
         self._send_btn.pack(side=tk.RIGHT)
 
+        self._resume_btn = tk.Button(input_row, text="Resume", bg="#5a8a3a", fg="#ffffff",
+                                     relief=tk.FLAT, bd=0, font=("TkDefaultFont", 11, "bold"),
+                                     activebackground="#6aaa4a", activeforeground="#ffffff",
+                                     command=self._do_resume, cursor="hand2",
+                                     state=tk.DISABLED, padx=16, pady=4)
+
         self._cancel_btn = tk.Button(input_row, text="Cancel", bg="#bf7b00", fg="#ffffff",
                                      relief=tk.FLAT, bd=0, font=("TkDefaultFont", 11, "bold"),
                                      activebackground="#d49500", activeforeground="#ffffff",
@@ -1281,6 +1287,8 @@ class ThetaCodeApp:
     def _enable_input(self):
         self._input_text.configure(state=tk.NORMAL)
         self._send_btn.configure(state=tk.NORMAL)
+        self._resume_btn.configure(state=tk.NORMAL)
+        self._resume_btn.pack(side=tk.RIGHT, padx=(8, 0))
         self._cancel_btn.pack_forget()
         self._cancel_btn.configure(state=tk.DISABLED)
         self._model_entry.configure(state=tk.NORMAL)
@@ -1288,11 +1296,13 @@ class ThetaCodeApp:
     def _disable_input(self):
         self._input_text.configure(state=tk.DISABLED)
         self._send_btn.configure(state=tk.DISABLED)
+        self._resume_btn.configure(state=tk.DISABLED)
 
     def _show_thinking_indicator(self):
         self._thinking_label.configure(text="AI is thinking…")
         self._thinking_progress.pack(side=tk.LEFT, padx=(8, 0))
         self._thinking_progress.start(10)
+        self._resume_btn.pack_forget()
         self._cancel_btn.configure(state=tk.NORMAL)
         self._cancel_btn.pack(side=tk.RIGHT, padx=(8, 0))
 
@@ -1372,6 +1382,66 @@ class ThetaCodeApp:
             try:
                 result = chat_obj.send_message_stream(
                     text, llm, on_token=on_token, on_new_message=on_new_msg, cancel_event=cancel_event,
+                )
+            except Exception as exc:
+                state.stream_queue.put(("error", str(exc)))
+            else:
+                if cancel_event and cancel_event.is_set():
+                    state.stream_queue.put(("cancelled", assistant_final[0]))
+                else:
+                    state.stream_queue.put(("done", assistant_final[0]))
+        threading.Thread(target=_stream_worker, daemon=True).start()
+        if not state._poll_running:
+            self._poll_stream_queue(state.chat_id)
+
+    def _do_resume(self):
+        """Resume the agentic loop without sending a new user message."""
+        state = self._get_active_chat_state()
+        if not state or state.is_thinking or not state.chat:
+            return
+        self._disable_input()
+        state.is_thinking = True
+        state.cancel_event = threading.Event()
+        state.current_stream_placeholder = None
+        self._show_thinking_indicator()
+
+        chat_obj = state.chat
+        llm_str = (self._model_var.get() or DEFAULT_MODEL).strip()
+        try:
+            llm = get_llm(llm_str, headroom_enabled=self._headroom_var.get())
+        except ValueError as exc:
+            self._add_message_bubble({
+                "role": "assistant", "content": f"[Configuration error] {exc}\n\nPlease set a valid model name above.",
+                "thinking": "", "cost": 0.0,
+            }, chat_state=state)
+            state.is_thinking = False
+            state.cancel_event = None
+            self._hide_thinking_indicator()
+            self._enable_input()
+            return
+
+        ph = self._insert_streaming_placeholder(chat_state=state)
+        state.current_stream_placeholder = ph
+        assistant_final = [None]
+        def on_token(content: str):
+            state.stream_queue.put(("token", content))
+        def on_new_msg(msg: dict):
+            role = msg.get("role", "")
+            if role == "assistant":
+                content = msg.get("content", "")
+                if "<tool_call>" in content and "</tool_call>" in content:
+                    state.stream_queue.put(("assistant_tool", msg))
+                else:
+                    assistant_final[0] = msg
+                return
+            if msg.get("content", "").lstrip().startswith("<user_message>"):
+                return
+            state.stream_queue.put(("message", msg))
+        cancel_event = state.cancel_event
+        def _stream_worker():
+            try:
+                result = chat_obj.resume(
+                    llm, on_token=on_token, on_new_message=on_new_msg, cancel_event=cancel_event,
                 )
             except Exception as exc:
                 state.stream_queue.put(("error", str(exc)))
