@@ -1366,7 +1366,6 @@ class ThetaCodeApp:
         self._persist_and_show(user_msg)
         ph = self._insert_streaming_placeholder(chat_state=state)
         state.current_stream_placeholder = ph
-        assistant_final = [None]
         def on_token(content: str):
             state.stream_queue.put(("token", content))
         def on_new_msg(msg: dict):
@@ -1376,7 +1375,7 @@ class ThetaCodeApp:
                 if "<tool_call>" in content and "</tool_call>" in content:
                     state.stream_queue.put(("assistant_tool", msg))
                 else:
-                    assistant_final[0] = msg
+                    state.stream_queue.put(("assistant_no_tool", msg))
                 return
             if msg.get("content", "").lstrip().startswith("<user_message>"):
                 return
@@ -1391,9 +1390,9 @@ class ThetaCodeApp:
                 state.stream_queue.put(("error", str(exc)))
             else:
                 if cancel_event and cancel_event.is_set():
-                    state.stream_queue.put(("cancelled", assistant_final[0]))
+                    state.stream_queue.put(("cancelled", None))
                 else:
-                    state.stream_queue.put(("done", assistant_final[0]))
+                    state.stream_queue.put(("done", None))
         threading.Thread(target=_stream_worker, daemon=True).start()
         if not state._poll_running:
             self._poll_stream_queue(state.chat_id)
@@ -1426,7 +1425,6 @@ class ThetaCodeApp:
 
         ph = self._insert_streaming_placeholder(chat_state=state)
         state.current_stream_placeholder = ph
-        assistant_final = [None]
         def on_token(content: str):
             state.stream_queue.put(("token", content))
         def on_new_msg(msg: dict):
@@ -1436,7 +1434,7 @@ class ThetaCodeApp:
                 if "<tool_call>" in content and "</tool_call>" in content:
                     state.stream_queue.put(("assistant_tool", msg))
                 else:
-                    assistant_final[0] = msg
+                    state.stream_queue.put(("assistant_no_tool", msg))
                 return
             if msg.get("content", "").lstrip().startswith("<user_message>"):
                 return
@@ -1451,9 +1449,9 @@ class ThetaCodeApp:
                 state.stream_queue.put(("error", str(exc)))
             else:
                 if cancel_event and cancel_event.is_set():
-                    state.stream_queue.put(("cancelled", assistant_final[0]))
+                    state.stream_queue.put(("cancelled", None))
                 else:
-                    state.stream_queue.put(("done", assistant_final[0]))
+                    state.stream_queue.put(("done", None))
         threading.Thread(target=_stream_worker, daemon=True).start()
         if not state._poll_running:
             self._poll_stream_queue(state.chat_id)
@@ -1496,6 +1494,18 @@ class ThetaCodeApp:
                             self._finalize_streaming_bubble(ph, msg, chat_state=state)
                             self._update_chat_cost(state)
                         state.current_stream_placeholder = None
+                    elif action == "assistant_no_tool":
+                        _, msg = item
+                        self.storage.append_message(
+                            chat_id=chat_id, role="assistant",
+                            content=msg.get("content", ""), thinking=msg.get("thinking", "") or "",
+                            cost=msg.get("cost", 0.0) or 0.0, llm_model=msg.get("llm", "") or "",
+                        )
+                        ph = state.current_stream_placeholder
+                        if ph:
+                            self._finalize_streaming_bubble(ph, msg, chat_state=state)
+                            self._update_chat_cost(state)
+                        state.current_stream_placeholder = None
                     elif action == "error":
                         _, error = item
                         ph = state.current_stream_placeholder
@@ -1509,21 +1519,9 @@ class ThetaCodeApp:
                             self._enable_input()
                             self._update_chat_cost(state)
                     elif action == "cancelled":
-                        _, final_msg = item
                         ph = state.current_stream_placeholder
-                        if ph is None and final_msg is not None:
-                            ph = self._insert_streaming_placeholder(chat_state=state)
-                            state.current_stream_placeholder = ph
                         if ph:
-                            if final_msg is not None:
-                                self._finalize_streaming_bubble(ph, final_msg, chat_state=state)
-                                self.storage.append_message(
-                                    chat_id=chat_id, role="assistant",
-                                    content=final_msg.get("content", ""), thinking=final_msg.get("thinking", "") or "",
-                                    cost=final_msg.get("cost", 0.0) or 0.0, llm_model=final_msg.get("llm", "") or "",
-                                )
-                            else:
-                                self._finalize_streaming_bubble(ph, None, chat_state=state)
+                            self._finalize_streaming_bubble(ph, None, chat_state=state)
                         state.is_thinking = False
                         state.cancel_event = None
                         state.current_stream_placeholder = None
@@ -1532,21 +1530,9 @@ class ThetaCodeApp:
                             self._enable_input()
                             self._update_chat_cost(state)
                     elif action == "done":
-                        _, final_msg = item
                         ph = state.current_stream_placeholder
-                        if ph is None and final_msg is not None:
-                            ph = self._insert_streaming_placeholder(chat_state=state)
-                            state.current_stream_placeholder = ph
                         if ph:
-                            if final_msg is not None:
-                                self._finalize_streaming_bubble(ph, final_msg, chat_state=state)
-                                self.storage.append_message(
-                                    chat_id=chat_id, role="assistant",
-                                    content=final_msg.get("content", ""), thinking=final_msg.get("thinking", "") or "",
-                                    cost=final_msg.get("cost", 0.0) or 0.0, llm_model=final_msg.get("llm", "") or "",
-                                )
-                            else:
-                                self._finalize_streaming_bubble(ph, None, chat_state=state)
+                            self._finalize_streaming_bubble(ph, None, chat_state=state)
                         state.is_thinking = False
                         state.cancel_event = None
                         state.current_stream_placeholder = None
