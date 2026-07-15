@@ -271,11 +271,15 @@ class ThetaCodeApp:
     def _build_chat_panel(self):
         f = self._right_frame
 
-        self._chat_container = tk.Frame(f, bg=BG_SURFACE)
-        self._chat_container.pack(fill=tk.BOTH, expand=True)
+        self._vpaned = tk.PanedWindow(f, orient=tk.VERTICAL, bg="#3d3d3d",
+                                      sashwidth=4, sashrelief=tk.FLAT)
+        self._vpaned.pack(fill=tk.BOTH, expand=True)
 
-        bottom = tk.Frame(f, bg=BG_SURFACE)
-        bottom.pack(fill=tk.X, side=tk.BOTTOM)
+        self._chat_container = tk.Frame(self._vpaned, bg=BG_SURFACE)
+        self._vpaned.add(self._chat_container, minsize=200, stretch="always")
+
+        bottom = tk.Frame(self._vpaned, bg=BG_SURFACE)
+        self._vpaned.add(bottom, minsize=110, height=120, stretch="never")
 
         tk.Frame(bottom, bg="#3d3d3d", height=1).pack(fill=tk.X)
 
@@ -319,13 +323,13 @@ class ThetaCodeApp:
         self._docker_label.pack(side=tk.LEFT, padx=(12, 0))
 
         input_row = tk.Frame(bottom, bg=BG_SURFACE)
-        input_row.pack(fill=tk.X, padx=12, pady=(4, 12))
+        input_row.pack(fill=tk.BOTH, expand=True, padx=12, pady=(4, 12))
 
         self._input_text = tk.Text(input_row, bg=BG_SURFACE_CONTAINER, fg=FG_PRIMARY,
                                    relief=tk.FLAT, bd=0, insertbackground=FG_PRIMARY,
                                    font=("TkDefaultFont", 12), height=2, wrap=tk.WORD,
                                    padx=10, pady=8)
-        self._input_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self._input_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
         self._input_text.bind("<Return>", self._on_input_return)
         self._input_text.bind("<Shift-Return>", self._on_input_shift_return)
         self._input_text.configure(state=tk.DISABLED)
