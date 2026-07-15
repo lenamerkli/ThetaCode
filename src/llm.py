@@ -73,6 +73,12 @@ class OpenRouterLLM(LLM):
                     ('">', '</tool_name>')
                 ):
                     message.replace(old, new, 1)
+            if '<tool_name name="' in message:
+                for old, new in (
+                    ('<tool_name name="', '<tool_name>'),
+                    ('">', '</tool_name>')
+                ):
+                    message.replace(old, new, 1)
         elif model_name == 'z-ai/glm-5.2':
             message = message.replace('</parameter>', '</tool_call>')
             if '</tool_name>' not in message:
