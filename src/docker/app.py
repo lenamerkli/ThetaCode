@@ -28,7 +28,7 @@ def execute():
     data = request.get_json()
     command = data.get('command', '')
     timeout = data.get('timeout', 60)
-    directory = data.get('directory', '/home/agent/')
+    cwd = data.get('cwd', '/home/agent/')
     venv = data.get('venv', None)
     if venv:
         command = f"source {venv}/bin/activate && {command}"
@@ -41,7 +41,7 @@ def execute():
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=directory
+            cwd=cwd
         )
         return {
             'stdout': result.stdout,
