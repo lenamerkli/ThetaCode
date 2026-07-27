@@ -1,3 +1,4 @@
+import os
 import shutil
 import threading
 import typing as t
@@ -69,8 +70,12 @@ class ThetaCode:
         if self._running:
             return
         if self._mode == 'docker':
+            env = {}
+            if os.environ.get('BRAVE_API_KEY'):
+                env['BRAVE_API_KEY'] = os.environ['BRAVE_API_KEY']
             self._backend.start(
                 additional_volumes=[(self._project.path, f"/home/agent/{self._project.name}")],
+                env=env if env else None,
             )
             self._running = True
             sleep(1)
