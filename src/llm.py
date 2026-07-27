@@ -58,48 +58,6 @@ class OpenRouterLLM(LLM):
             headers["X-OpenRouter-Categories"] = _APP_CATEGORIES
         return headers
 
-    @staticmethod
-    def _fix_specific_responses(model_name: str, message: str) -> str:
-        if model_name.startswith('deepseek'):
-            for old, new in (
-                ('tool_call_name>', 'tool_name>'),
-                ('tool_caller_id>', 'tool_call>'),
-                ('tool_calls>', 'tool_call>'),
-            ):
-                message = message.replace(old, new)
-            if '<tool_call name="' in message:
-                for old, new in (
-                    ('<tool_call name="', '<tool_call>\n<tool_name>'),
-                    ('">', '</tool_name>')
-                ):
-                    message.replace(old, new, 1)
-            if '<tool_name name="' in message:
-                for old, new in (
-                    ('<tool_name name="', '<tool_name>'),
-                    ('">', '</tool_name>')
-                ):
-                    message.replace(old, new, 1)
-        elif model_name == 'z-ai/glm-5.2':
-            message = message.replace('</parameter>', '</tool_call>')
-            if '</tool_name>' not in message:
-                message = message.replace(
-                    '<tool_call>bash',
-                    '<tool_call>\n<tool_name>bash</tool_name>',
-                )
-            if '<tool_name>bash</tool_name>' in message:
-                message = message.replace(
-                    '<tool_call>bash<tool_name>',
-                    '<tool_call><tool_name>',
-                )
-                message = message.replace(
-                    '</arg_value>',
-                    '' if '</command>' in message else '</command>',
-                )
-                message = message.replace(
-                    '<arg_key>',
-                    '' if '<command>' in message else '<command>',
-                )
-        return message
 
     def _compress_conversation(self, conversation: T_CONVERSATION) -> T_CONVERSATION:
         """Compress the conversation using headroom if available and enabled."""
@@ -160,7 +118,6 @@ class OpenRouterLLM(LLM):
         message['content'] = message.get('content', '')
         if ('<tool_call>' in message['content']) and ('</tool_call>' not in message['content']):
             message['content'] += '</tool_call>'
-        message['content'] = self._fix_specific_responses(self.model, message['content']).replace('</tool_call></tool_call>', '</tool_call>')
         return {
             'text': message['content'],
             'cost': response_json.get('usage', {}).get('cost', 0.0),

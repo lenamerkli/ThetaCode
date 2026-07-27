@@ -9,6 +9,7 @@ from docker import Docker, CONTAINER_IP
 from local_executor import LocalExecutor, RESOURCES_DIR
 from requests import request
 from llm import T_CONVERSATION, T_STREAM_CALLBACK, load_prompt, LLM
+from src.toolcall_repair import repair
 
 
 class Project:
@@ -358,11 +359,9 @@ class Chat:
                 else:
                     response = llm.generate(self._conversation)
                 self._cost += response['cost']
-                if 'nemotron' in llm.model.lower():
-                    response['text'] = response['text'].replace('</invoke>', '</tool_call>')
                 assistant_entry = {
                     'role': 'assistant',
-                    'content': response['text'],
+                    'content': repair(response['text']),
                     'thinking': response['thinking'],
                     'cost': response['cost'],
                     'llm': llm.model,
