@@ -10,7 +10,13 @@ Execute a bash shell command. Use `sudo` for privileged commands.
 - directory: str; default: the project root (`%%project_path%%`); the working directory to execute the command in
 - venv: str; default: None; the python virtual environment to execute the command in
 - max_chars: int; default: 100000; the maximum number of characters of output. It will cut off the entire tool response, not just stdout.
-### Example
+### Example 1
+<tool_call>
+<tool_name>bash</tool_name>
+<command>ls -la | tail -5</command>
+<directory>~/examples/</directory>
+</tool_call>
+### Example 2
 <tool_call>
 <tool_name>bash</tool_name>
 <command>~/software/search_the_web "requests.Session.auth" > ~/tmp/websearch_requests_session_auth.txt && head -n 15 ~/tmp/websearch_requests_session_auth.txt</command>
@@ -65,23 +71,20 @@ This is the main method to edit files.
 ### Example
 <tool_call>
 <tool_name>replace_in_file</tool_name>
-<path>%%project_path%%/web/maintenance.html</path>
-<search>
-is currently unavailable.</p>
-</search>
-<replace>
-is currently unavailable due to ongoing maintainance.</p>
-</replace>
+<path>/home/agent/web/maintenance.html</path>
+<search>is currently unavailable.</search>
+<replace>is currently unavailable due to ongoing maintenance.</replace>
 </tool_call>
 ## ask_user
 Ask the user a question. Use for clarification or if you are stuck somewhere. Also use this tool call if you are finished, just ask if the user is satisfied with your work.
 ### Attributes
 - question: str; required; the question to ask the user.
-### Examples
+### Example 1
 <tool_call>
 <tool_name>ask_user</tool_name>
 <question>How should the search functionality on the website be implemented? I suggest using a chromadb vector search.</question>
 </tool_call>
+### Example 2
 <tool_call>
 <tool_name>ask_user</tool_name>
 <question>I have implemented searching on the website and have tested it with edge cases. Are you satisfied with my work or is there something that needs to be changed or added?</question>

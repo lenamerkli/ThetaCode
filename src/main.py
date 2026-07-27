@@ -201,9 +201,36 @@ class Chat:
         # First slot reserved for the system message (filled lazily).
         self._conversation: T_CONVERSATION = [{'role': 'system', 'content': ''}]
         self._cost = 0.0
+        # Rotate through tool_call_parsing_error variants to avoid repetition
+        self._tool_call_parsing_error_count: int = 0
+        self._tool_call_parsing_error_versions: int = self._detect_parsing_error_versions()
 
     def get_cost(self) -> float:
         return self._cost
+
+    @staticmethod
+    def _detect_parsing_error_versions() -> int:
+        """Count how many tool_call_parsing_error.N.md files exist in prompts/."""
+        prompts_dir = Path(__file__).parent / 'prompts'
+        versions = 0
+        v = 1
+        while (prompts_dir / f'tool_call_parsing_error.{v}.md').exists():
+            versions += 1
+            v += 1
+        return versions
+
+    def _get_next_tool_call_parsing_error(self) -> str:
+        """Rotate through available tool_call_parsing_error variants.
+
+        First call returns version 1, second returns version 2, third returns
+        version 1 again, etc.  Additional .3.md, .4.md files are picked up
+        automatically.
+        """
+        self._tool_call_parsing_error_count += 1
+        if self._tool_call_parsing_error_versions <= 1:
+            return load_prompt('tool_call_parsing_error', version=1)
+        version = ((self._tool_call_parsing_error_count - 1) % self._tool_call_parsing_error_versions) + 1
+        return load_prompt('tool_call_parsing_error', version=version)
 
     def restore_messages(self, stored_messages: list[dict]):
         """Rebuild _conversation from rows fetched out of the DB.
@@ -375,7 +402,7 @@ class Chat:
             # Last message is from the assistant – check for a tool call.
             content = last['content']
             if '<tool_call>' not in content or '</tool_call>' not in content:
-                no_tool_entry = {'role': 'user', 'content': load_prompt('tool_call_parsing_error')}
+                no_tool_entry = {'role': 'user', 'content': self._get_next_tool_call_parsing_error()}
                 self._conversation.append(no_tool_entry)
                 if on_new_message:
                     on_new_message(no_tool_entry)
@@ -385,7 +412,7 @@ class Chat:
 
             if '<tool_name>' not in content or '</tool_name>' not in options:
                 # Malformed tool call
-                err_entry = {'role': 'user', 'content': load_prompt('tool_call_parsing_error')}
+                err_entry = {'role': 'user', 'content': self._get_next_tool_call_parsing_error()}
                 self._conversation.append(err_entry)
                 if on_new_message:
                     on_new_message(err_entry)

@@ -1,5 +1,4 @@
-# Introduction
-You are an expert coding assistant operating inside ThetaCode, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files. You are running inside a docker container. The project that you are working on is at `/home/agent/%%project_name%%`.
+The tool call you tried to make is unable to be parsed. You must use one and only one tool call at a time and then end your turn of the conversation. You must include the <tool_call> XML tags.
 # Tool Calling
 Tool Calling is very important to accomplish most tasks. You may only one tool call at a time and then end your turn of the conversation. You must include the <tool_call> XML tags.
 ## bash
@@ -89,7 +88,3 @@ Ask the user a question. Use for clarification or if you are stuck somewhere. Al
 <tool_name>ask_user</tool_name>
 <question>I have implemented searching on the website and have tested it with edge cases. Are you satisfied with my work or is there something that needs to be changed or added?</question>
 </tool_call>
-# Additional Software
-In `/home/agent/software/` there are a lot of useful software tools. This includes among other things web search. Use bash commands to both search for the right tool and run the software.
-# Examples
-There are examples on how to do certain things in the `/home/agent/examples/` directory. These might help but are never a full solution to the given task. They also provide guidance on how to use the additional software.

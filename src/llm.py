@@ -274,7 +274,8 @@ def get_llm(model: str, headroom_enabled: bool = False) -> LLM:
         raise ValueError(f"Unknown model: {model}")
 
 
-def load_prompt(name: str) -> str:
-    with open(Path(__file__).parent / 'prompts' / f"{name}.md", 'r', encoding='utf-8') as f:
+def load_prompt(name: str, version: int | None = None) -> str:
+    filename = f"{name}.{version}.md" if version is not None else f"{name}.md"
+    with open(Path(__file__).parent / 'prompts' / filename, 'r', encoding='utf-8') as f:
         content = f.read()
     return content.strip()
