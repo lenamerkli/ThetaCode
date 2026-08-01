@@ -9,7 +9,7 @@ from docker import Docker, CONTAINER_IP
 from local_executor import LocalExecutor, RESOURCES_DIR
 from requests import request
 from llm import T_CONVERSATION, T_STREAM_CALLBACK, load_prompt, LLM
-from src.toolcall_repair import repair
+from toolcall_repair import repair
 
 
 class Project:
