@@ -63,6 +63,15 @@ from .schema import (
 __all__ = ["ToolCall", "ToolCallRepairer", "repair", "parse", "parse_all", "find_tool_calls"]
 
 _NAME = r"[A-Za-z_][A-Za-z0-9_.:-]*"
+#: Bars used by model special tokens: ASCII ``|`` and fullwidth ``｜`` (U+FF5C),
+#: as in DeepSeek's ``<｜tool▁calls▁begin｜>`` or Llama's ``<|python_tag|>``.
+_BARS = "\uff5c|"
+#: A leaked special-token marker sitting inside a tag, e.g. ``｜DSML｜``.
+_SPECIAL = rf"[{_BARS}][^<>{_BARS}]{{0,40}}[{_BARS}]"
+#: ``<｜DSML｜command …>`` / ``</｜DSML｜parameter>`` / ``</｜DSML｜>``
+_SPECIAL_TAG = re.compile(rf"<\s*(?P<slash>/?)\s*(?:{_SPECIAL})\s*(?P<name>{_NAME})?(?P<attrs>\s[^<>]*)?\s*/?>")
+#: A marker fragment that never reaches a ``>``: ``</｜DSML｜</command>``
+_SPECIAL_FRAGMENT = re.compile(rf"<\s*/?\s*(?:{_SPECIAL})(?![^<>]*>)")
 _TOOL_CALL_OPEN = re.compile(rf"<\s*(?P<tag>{_NAME})(?P<attrs>\s[^>]*)?/?>", re.S)
 _ATTR = re.compile(rf"(?P<key>{_NAME})\s*=\s*(?P<q>[\"'])(?P<val>.*?)(?P=q)", re.S)
 
@@ -179,7 +188,7 @@ class ToolCallRepairer:
 
         # Splice against the dissolved text so a container tag around the call
         # is not re-emitted verbatim in the surrounding context.
-        canvas = self._dissolve_containers(text)
+        canvas = self._dissolve_containers(self._strip_special_tokens(text))
 
         if not multi:
             first = calls[0]
@@ -197,6 +206,98 @@ class ToolCallRepairer:
     # ------------------------------------------------------------------
     # segmentation: locate each <tool_call> ... </tool_call> region
     # ------------------------------------------------------------------
+    @staticmethod
+    def _quoted(text: str, pos: int) -> bool:
+        """True when *pos* sits inside a quoted string on its own line.
+
+        Genuine leaked markup is emitted as bare markup; a marker appearing
+        inside quotes -- ``echo '</|DSML|parameter>'`` -- is payload data.
+        """
+        line_start = text.rfind("\n", 0, pos) + 1
+        before = text[line_start:pos]
+        for q in ("'", '"', "`"):
+            if before.count(q) % 2 == 1:
+                return True
+        # Inside an unterminated ``` fence -> payload (documentation, snippets).
+        return text.count("```", 0, line_start) % 2 == 1
+
+    @staticmethod
+    def _marker_of(fragment: str) -> str:
+        """Extract the bar-delimited marker token from a tag fragment."""
+        m = re.search(rf"[{_BARS}][^<>{_BARS}]{{0,40}}[{_BARS}]", fragment)
+        return m.group(0).strip(_BARS).strip().lower() if m else ""
+
+    @classmethod
+    def _marker_stats(cls, text: str) -> Dict[str, Dict[str, int]]:
+        """Count occurrences of each bar-delimited marker inside tags."""
+        stats: Dict[str, Dict[str, int]] = {}
+        for m in _SPECIAL_TAG.finditer(text):
+            tok = cls._marker_of(m.group(0))
+            if not tok:
+                continue
+            s = stats.setdefault(tok, {"total": 0, "named": 0, "structural": 0})
+            s["total"] += 1
+            if m.group("name") and not cls._quoted(text, m.start()):
+                s["named"] += 1
+                if cls._structural(text, m.start()):
+                    s["structural"] += 1
+        return stats
+
+    @classmethod
+    def _strip_special_tokens(cls, text: str) -> str:
+        """Remove leaked model special tokens from *tag names*.
+
+        Some models emit their internal markup tokens inside tag names::
+
+            <｜DSML｜tool_call>  <｜DSML｜command>ls</｜DSML｜parameter>  </｜DSML｜>
+
+        The marker is delimited by ASCII ``|`` or fullwidth ``｜`` (U+FF5C).
+        Because ``_NAME`` requires an ASCII-letter start, such tags are
+        otherwise invisible to the scanner and the whole call is lost.
+
+        Rewrites are confined to text that is *already* inside a tag (between
+        ``<`` and ``>``), so a bar character in a shell pipeline or a payload is
+        never touched.  Three shapes:
+
+        ``<｜X｜name>``  -> ``<name>``      (named: keep the name)
+        ``</｜X｜>``     -> ``</>``         (anonymous closer: name unknown)
+        ``</｜X｜``      -> ``''``          (truncated fragment: drop)
+        """
+        if not any(b in text for b in _BARS):
+            return text
+
+        # Identify which marker is genuine leaked markup rather than incidental
+        # payload text.  A real leak is a *systematic* artefact of the decoder:
+        # the same token recurs, and it attaches to structural tag names.  A
+        # payload occurrence such as ``TOK = '<|endoftext|>'`` appears once and
+        # carries no tag name, so it is left untouched.
+        # A named bar-delimited tag (``</｜DSML｜parameter>``) is already strong
+        # evidence: a payload occurrence carries no tag name.  Requiring a name
+        # is what protects literals like ``'<|endoftext|>'``.
+        leaked = {tok for tok, hits in cls._marker_stats(text).items() if hits["named"] >= 1}
+        if not leaked:
+            return text
+
+        def fix(m: "re.Match") -> str:
+            whole = m.group(0)
+            name = m.group("name")
+            if cls._marker_of(whole) not in leaked or cls._quoted(text, m.start()):
+                return whole
+            if not name:
+                # Nameless closer: keep it as an anonymous boundary marker so
+                # the value it terminates is still bounded correctly.
+                return "</>" if m.group("slash") else ""
+            return f"<{m.group('slash')}{name}{m.group('attrs') or ''}>"
+
+        stripped = _SPECIAL_TAG.sub(fix, text)
+
+        def drop(m: "re.Match") -> str:
+            if cls._marker_of(m.group(0)) not in leaked or cls._quoted(stripped, m.start()):
+                return m.group(0)
+            return ""
+
+        return _SPECIAL_FRAGMENT.sub(drop, stripped)
+
     @staticmethod
     def _dissolve_containers(text: str) -> str:
         """Blank out plural batch containers, preserving every offset.
@@ -216,6 +317,7 @@ class ToolCallRepairer:
         return re.sub(r"</?\s*(?:%s)(?:\s[^>]*)?/?>" % "|".join(CONTAINER_TAGS), blank, text)
 
     def _segments(self, text: str) -> List[Tuple[str, int]]:
+        text = self._strip_special_tokens(text)
         original = text
         text = self._dissolve_containers(text)
         self._blanked = (original, text) if text != original else None
@@ -547,8 +649,11 @@ class ToolCallRepairer:
     @staticmethod
     def _find_closers(body: str, names: set) -> List[Tuple[int, int]]:
         out = []
-        for m in re.finditer(rf"</\s*({_NAME})(?:\s[^>]*)?>", body):
-            if m.group(1).lower() in names:
+        for m in re.finditer(rf"</\s*({_NAME})?(?:\s[^>]*)?>", body):
+            tag = m.group(1)
+            # ``</>`` is an anonymous closer produced by special-token
+            # stripping: it bounds a value without naming it.
+            if tag is None or tag.lower() in names:
                 out.append((m.start(), m.end()))
         return out
 
