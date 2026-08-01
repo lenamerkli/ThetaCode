@@ -86,7 +86,7 @@ def _ensure_vm_resources() -> None:
 
     # Write software wrapper scripts into ~/software/
     src_software_dir = Path(__file__).parent / 'docker' / 'software'
-    for script_name in ['search_the_web', 'webpage_to_markdown']:
+    for script_name in ['search_the_web', 'webpage_to_markdown', 'initialize_minecraft_fabric_mod']:
         dest = home / 'software' / script_name
         wrapper = f'''#!/bin/bash
 # ThetaCode VM software wrapper
@@ -103,6 +103,16 @@ exec python3 "/opt/thetacode/{script_name}.py" "$@"
         dest = opt_dir / py_file.name
         if not dest.exists():
             dest.write_text(py_file.read_text())
+
+    # Copy opt assets (e.g. initialize_minecraft_fabric_mod assets) into /opt/thetacode/
+    src_assets_dir = src_opt_dir / 'assets'
+    if src_assets_dir.exists():
+        dest_assets_dir = opt_dir / 'assets'
+        dest_assets_dir.mkdir(parents=True, exist_ok=True)
+        for asset in src_assets_dir.iterdir():
+            dest = dest_assets_dir / asset.name
+            if not dest.exists():
+                dest.write_bytes(asset.read_bytes())
 
     # Copy examples into ~/examples/
     src_examples_dir = Path(__file__).parent / 'docker' / 'examples'
@@ -143,7 +153,7 @@ def _write_software_wrappers() -> None:
     """Write bash wrapper scripts for custom software that source the resources venv."""
     src_dir = Path(__file__).parent / 'docker' / 'software'
 
-    for script_name in ['search_the_web', 'webpage_to_markdown']:
+    for script_name in ['search_the_web', 'webpage_to_markdown', 'initialize_minecraft_fabric_mod']:
         container_path = SOFTWARE_DIR / script_name
         wrapper = f'''#!/bin/bash
 # ThetaCode local software wrapper
@@ -162,6 +172,16 @@ def _symlink_opt_scripts() -> None:
         dest = OPT_DIR / py_file.name
         if not dest.exists():
             dest.write_text(py_file.read_text())
+
+    # Copy opt assets (e.g. initialize_minecraft_fabric_mod assets) into resources/opt
+    src_assets_dir = src_opt_dir / 'assets'
+    if src_assets_dir.exists():
+        dest_assets_dir = OPT_DIR / 'assets'
+        dest_assets_dir.mkdir(parents=True, exist_ok=True)
+        for asset in src_assets_dir.iterdir():
+            dest = dest_assets_dir / asset.name
+            if not dest.exists():
+                dest.write_bytes(asset.read_bytes())
 
 
 def _symlink_examples() -> None:
