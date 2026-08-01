@@ -15,10 +15,72 @@ _APP_HTTP_REFERER = "https://github.com/lenamerkli/ThetaCode"
 _APP_TITLE = "ThetaCode"
 _APP_CATEGORIES = "cli-agent,programming-app"
 
+REPETITION_CHECK_SPAN = 10000     # how far back to search (chars)
+# (window_size, min_occurrences) — shorter windows need more hits
+REPETITION_RULES = [
+    (30, 30),
+    (50, 25),
+    (80, 15),
+    (150, 12),
+    (300, 6),
+    (1000, 4),
+]
+
 
 T_CONVERSATION = t.List[t.Dict[str, str]]
 T_COMPLETION = t.Dict[str, t.Union[str, int, float]]
 T_STREAM_CALLBACK = t.Callable[[str], None]
+
+
+def _find_repeating_window(text: str) -> tuple[int, str] | tuple[None, None]:
+    """Find the earliest-position repeating window in the check region.
+
+    Scans all window sizes defined in REPETITION_RULES across the tail
+    portion of ``text``.  Returns the earliest character offset (relative
+    to the start of the text) where any window begins, along with the
+    matching window string, or ``(None, None)`` if nothing repeats.
+    """
+    if len(text) < 30:
+        return None, None
+    check_start = max(0, len(text) - REPETITION_CHECK_SPAN)
+    check_region = text[check_start:]
+
+    for window_size, min_occurrences in REPETITION_RULES:
+        if len(check_region) < window_size * min_occurrences:
+            continue
+        seen: dict[str, int] = {}
+        for i in range(len(check_region) - window_size + 1):
+            window = check_region[i:i + window_size]
+            count = seen.get(window, 0) + 1
+            seen[window] = count
+            if count >= min_occurrences:
+                return check_start + i, window
+    return None, None
+
+
+def _detect_repetition(text: str) -> bool:
+    """Return True if any window-size rule detects repetition."""
+    found_pos, _ = _find_repeating_window(text)
+    return found_pos is not None
+
+
+def _force_close_response(response) -> None:
+    """Force-close the underlying TCP connection of a streaming response.
+
+    Python ``requests``' ``response.close()`` can block trying to drain
+    the socket.  We bypass that by closing the raw urllib3 connection first,
+    which sends a TCP RST so the server immediately sees the disconnection
+    and cancels generation.
+    """
+    try:
+        # Close the urllib3 HTTPResponse (the raw socket)
+        response.raw.close()
+    except Exception:
+        pass
+    try:
+        response.close()
+    except Exception:
+        pass
 
 
 class LLM(ABC):
@@ -184,6 +246,7 @@ class OpenRouterLLM(LLM):
 
         buffer = bytearray()
         stream_finished = False
+        stream_cancelled = False
         try:
             for chunk_bytes in response.iter_content(chunk_size=1024):
                 # Check for cancellation on each chunk
@@ -249,14 +312,22 @@ class OpenRouterLLM(LLM):
                         if 'cost' in usage:
                             total_cost = usage['cost']
 
+                        # ---- Repetition detection ---------------------------
+                        if _detect_repetition(full_thinking + full_content):
+                            print("\n==== STREAM CANCELLED DUE TO REPETITION ====\n")
+                            stream_cancelled = True
+                            _force_close_response(response)
+                            break
+
                     except json.JSONDecodeError:
                         # Ignore malformed JSON chunks
                         pass
 
-                if stream_finished:
+                if stream_finished or stream_cancelled:
                     break
         finally:
-            response.close()
+            if not stream_cancelled:
+                response.close()
 
         print('\n' + '=' * 30 + ' End OpenRouter Streaming Response ' + '=' * 30)
         if ('<tool_call>' in full_content) and ('</tool_call>' not in full_content):
