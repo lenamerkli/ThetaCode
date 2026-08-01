@@ -7,6 +7,8 @@ import json
 import typing as t
 from importlib.util import find_spec
 
+from toolcall_repair import repair
+
 # App attribution for OpenRouter — these headers identify ThetaCode in
 # OpenRouter's public rankings and analytics.
 _APP_HTTP_REFERER = "https://github.com/lenamerkli/ThetaCode"
@@ -259,7 +261,7 @@ class OpenRouterLLM(LLM):
         print('\n' + '=' * 30 + ' End OpenRouter Streaming Response ' + '=' * 30)
         if ('<tool_call>' in full_content) and ('</tool_call>' not in full_content):
             full_content += '</tool_call>'
-        full_content = self._fix_specific_responses(model_name, full_content).replace('</tool_call></tool_call>', '</tool_call>')
+        full_content = repair(full_content)
         return {
             "text": full_content,
             "cost": total_cost,
