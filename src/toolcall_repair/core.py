@@ -69,7 +69,10 @@ _BARS = "\uff5c|"
 #: A leaked special-token marker sitting inside a tag, e.g. ``｜DSML｜``.
 _SPECIAL = rf"[{_BARS}][^<>{_BARS}]{{0,40}}[{_BARS}]"
 #: ``<｜DSML｜command …>`` / ``</｜DSML｜parameter>`` / ``</｜DSML｜>``
-_SPECIAL_TAG = re.compile(rf"<\s*(?P<slash>/?)\s*(?:{_SPECIAL})\s*(?P<name>{_NAME})?(?P<attrs>\s[^<>]*)?\s*/?>")
+#: ``eol`` captures a trailing newline so a marker that occupied a whole line
+#: can be removed without leaving a blank line behind.
+_SPECIAL_TAG = re.compile(
+    rf"<\s*(?P<slash>/?)\s*(?:{_SPECIAL})\s*(?P<name>{_NAME})?(?P<attrs>\s[^<>]*)?\s*/?>(?P<eol>[ \t]*\r?\n)?")
 #: A marker fragment that never reaches a ``>``: ``</｜DSML｜</command>``
 _SPECIAL_FRAGMENT = re.compile(rf"<\s*/?\s*(?:{_SPECIAL})(?![^<>]*>)")
 _TOOL_CALL_OPEN = re.compile(rf"<\s*(?P<tag>{_NAME})(?P<attrs>\s[^>]*)?/?>", re.S)
@@ -222,6 +225,43 @@ class ToolCallRepairer:
         return text.count("```", 0, line_start) % 2 == 1
 
     @staticmethod
+    def _owns_line(text: str, pos: int) -> bool:
+        """True when only whitespace precedes *pos* on its line."""
+        return not text[text.rfind("\n", 0, pos) + 1:pos].strip()
+
+    @classmethod
+    def _inside_value(cls, text: str, pos: int) -> bool:
+        """True when *pos* lies within an open parameter value.
+
+        Walks the clean (bar-free) tags before *pos* and tracks whether a
+        payload-bearing element such as ``<content>`` or ``<command>`` is still
+        open.  Structural tags (``<tool_call>``, ``<tool_name>``) never open a
+        payload.  Only *matched* pairs close a value, and the scan is
+        opener-driven, so a corrupt closer cannot fabricate a boundary.
+        """
+        depth = 0
+        for m in re.finditer(rf"<(?P<slash>/?)\s*(?P<tag>{_NAME})(?:\s[^<>]*)?>", text[:pos]):
+            tag = m.group("tag").lower()
+            if tag in TOOL_CALL_TAGS | CONTAINER_TAGS | TOOL_NAME_TAGS:
+                continue
+            if m.group("slash"):
+                depth = max(0, depth - 1)
+            else:
+                depth += 1
+        return depth > 0
+
+    @staticmethod
+    def _has_tool_markup(text: str) -> bool:
+        """True when *text* contains a genuine, unambiguous tool-call tag.
+
+        Used to corroborate bare markers.  ``<｜DSML｜>`` alone is ambiguous --
+        it could be payload -- but alongside a real ``<tool_call>`` or
+        ``<tool_name>`` it is almost certainly leaked decoder markup.
+        """
+        return bool(re.search(
+            r"</?\s*(?:%s)\s*>" % "|".join(TOOL_CALL_TAGS | TOOL_NAME_TAGS | CONTAINER_TAGS), text))
+
+    @staticmethod
     def _marker_of(fragment: str) -> str:
         """Extract the bar-delimited marker token from a tag fragment."""
         m = re.search(rf"[{_BARS}][^<>{_BARS}]{{0,40}}[{_BARS}]", fragment)
@@ -235,13 +275,42 @@ class ToolCallRepairer:
             tok = cls._marker_of(m.group(0))
             if not tok:
                 continue
-            s = stats.setdefault(tok, {"total": 0, "named": 0, "structural": 0})
+            s = stats.setdefault(tok, {"total": 0, "named": 0, "structural": 0, "bare": 0, "closing": 0})
             s["total"] += 1
-            if m.group("name") and not cls._quoted(text, m.start()):
+            if cls._quoted(text, m.start()):
+                continue
+            if m.group("name"):
                 s["named"] += 1
                 if cls._structural(text, m.start()):
                     s["structural"] += 1
+            elif cls._structural(text, m.start()) and not cls._inside_value(text, m.start()):
+                # ``<｜DSML｜>`` standing alone at a structural position and
+                # *outside* any parameter value -- i.e. where real markup lives.
+                s["bare"] += 1
+            elif m.group("slash"):
+                # ``…value</｜DSML｜>`` -- a *closing* marker form.  Decoder
+                # tokens that appear as payload (``<|endoftext|>``) are written
+                # without a slash, so the ``</`` is itself strong evidence of
+                # markup.  Quoted and fenced occurrences were excluded above.
+                s["closing"] += 1
         return stats
+
+    @classmethod
+    def _closes_value(cls, text: str, pos: int) -> bool:
+        """True when the marker at *pos* acts as a value's closing tag.
+
+        Recognised when the very next markup after it is a closing tag (or the
+        text simply ends).  A payload literal is followed by more payload, so
+        this stays false for ``TOK = '<|eot|>' ...`` inside a value.
+        """
+        rest = text[pos:]
+        after = rest[rest.index(">") + 1:] if ">" in rest else ""
+        nxt = re.search(r"<[^<>]*>", after)
+        if nxt is None or nxt.group(0).startswith("</"):
+            return True
+        # ``…value</｜X｜></path>`` -- the marker sits immediately before the
+        # value's real closer, i.e. it is a duplicated/leaked terminator.
+        return bool(re.match(r"\s*</", after))
 
     @classmethod
     def _strip_special_tokens(cls, text: str) -> str:
@@ -271,23 +340,61 @@ class ToolCallRepairer:
         # the same token recurs, and it attaches to structural tag names.  A
         # payload occurrence such as ``TOK = '<|endoftext|>'`` appears once and
         # carries no tag name, so it is left untouched.
-        # A named bar-delimited tag (``</｜DSML｜parameter>``) is already strong
-        # evidence: a payload occurrence carries no tag name.  Requiring a name
-        # is what protects literals like ``'<|endoftext|>'``.
-        leaked = {tok for tok, hits in cls._marker_stats(text).items() if hits["named"] >= 1}
+        # Two independent signatures qualify a marker as leaked markup:
+        #
+        #  * ``named``: it prefixes a real tag name -- ``</｜DSML｜parameter>``.
+        #  * ``bare`` : it forms a tag on its own at a structural position and
+        #    the token itself is *contentless* -- ``<｜DSML｜>`` on its own line.
+        #    Payload literals such as ``<|endoftext|>`` or ``<|python_tag|>``
+        #    carry a word between the bars, so they never match ``_is_token``.
+        #
+        # Either way a quoted or fenced occurrence is excluded up front, so
+        # documentation and shell strings survive untouched.
+        # Drop truncated fragments (``<｜DSML｜`` with no closing ``>``) first:
+        # left in place they swallow the following tag in the tag regex, so
+        # markers further on would survive this pass and only be removed by a
+        # later one -- making the whole operation non-idempotent.
+        probe = _SPECIAL_FRAGMENT.sub(
+            lambda m: "" if not cls._quoted(text, m.start()) else m.group(0), text)
+        if probe != text and cls._marker_stats(probe):
+            text = probe
+
+        stats = cls._marker_stats(text)
+        corroborated = cls._has_tool_markup(text)
+        leaked = {
+            tok for tok, hits in stats.items()
+            if hits["named"] >= 1
+            or hits["closing"] >= 1          # ``</｜X｜>`` -- a closer is markup
+            or (hits["bare"] >= 1 and corroborated)
+        }
         if not leaked:
             return text
+        # Once *any* token is confirmed leaked, the document is known to carry
+        # decoder markup, which corroborates every other bare marker in it.
+        # Deciding this up front keeps the pass idempotent: rewriting one token
+        # can create the tool markup that would qualify another on a later
+        # invocation, so both must be settled in the same pass.
+        leaked |= {tok for tok, hits in stats.items() if hits["bare"] >= 1}
 
         def fix(m: "re.Match") -> str:
             whole = m.group(0)
             name = m.group("name")
+            # Detection is per-document (``leaked``); rewriting is per-
+            # occurrence.  Once a token is known to be leaked markup, every
+            # unquoted occurrence of it is markup too -- including the closers
+            # that sit mid-line right after a value.
+            eol = m.group("eol") or ""
             if cls._marker_of(whole) not in leaked or cls._quoted(text, m.start()):
                 return whole
             if not name:
                 # Nameless closer: keep it as an anonymous boundary marker so
-                # the value it terminates is still bounded correctly.
-                return "</>" if m.group("slash") else ""
-            return f"<{m.group('slash')}{name}{m.group('attrs') or ''}>"
+                # the value it terminates is still bounded correctly.  A
+                # nameless *opener* carries no information at all -> drop it,
+                # together with the line it sat on.
+                if m.group("slash"):
+                    return "</>" + eol
+                return "" if cls._owns_line(text, m.start()) else eol
+            return f"<{m.group('slash')}{name}{m.group('attrs') or ''}>{eol}"
 
         stripped = _SPECIAL_TAG.sub(fix, text)
 
@@ -449,9 +556,11 @@ class ToolCallRepairer:
             if head_end > len(_TOOL_CALL_OPEN.match(segment).group(0) if _TOOL_CALL_OPEN.match(segment) else ""):
                 pass
 
-        # 2. a real <tool_name> element (content wins over its attributes)
+        # 2. a real <tool_name> element (content wins over its attributes).
+        #    The closer may be anonymous (``</>``) when special-token stripping
+        #    removed its name, so accept either form.
         full = re.search(
-            rf"<\s*(?P<tag>{_NAME})(?P<attrs>\s[^>]*)?>(?P<inner>.*?)</\s*(?P=tag)\s*>",
+            rf"<\s*(?P<tag>{_NAME})(?P<attrs>\s[^>]*)?>(?P<inner>.*?)</\s*(?:(?P=tag)\s*)?>",
             body,
             re.S,
         )
