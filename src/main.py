@@ -272,6 +272,39 @@ class Chat:
         content = load_prompt(prompt_name).replace('%%project_name%%', self._project.name)
         if self._project.mode == 'vm':
             content = content.replace('%%project_path%%', self._project.original_path or self._project.path)
+        if not content.endswith('\n'):
+            content += '\n'
+        software_dir = Path(__file__).parent / 'docker' / 'software'
+        software = []
+        if software_dir.is_dir():
+            for script_path in sorted(software_dir.iterdir()):
+                if not script_path.is_file():
+                    continue
+                name = script_path.name
+                if self._project.mode == 'vm':
+                    src_path = f"~/{name}"
+                else:
+                    src_path = f'/home/agent/software/{name}'
+                software.append(src_path)
+        examples_dir = Path(__file__).parent / 'docker' / 'examples'
+        examples = []
+        if examples_dir.is_dir():
+            for md_path in sorted(examples_dir.rglob('*.md')):
+                relative = str(md_path.relative_to(examples_dir))
+                if self._project.mode == 'vm':
+                    src_path = f'~/{relative}'
+                else:
+                    src_path = f'/home/agent/examples/{relative}'
+                examples.append(src_path)
+        if software:
+            content += '\n# Available Additional Software\n'
+            content += 'The following command-line tools are available in addition to the standard Linux tools:\n - '
+            content += '\n - '.join(software) + '\n'
+        if examples:
+            content += '\n# Available Example Documentation\n'
+            content += 'The following example guides can be read with the `read_file` tool:\n - '
+            content += '\n - '.join(examples) + '\n'
+
         self._conversation[0] = {
             'role': 'system',
             'content': content,

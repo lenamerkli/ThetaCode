@@ -89,9 +89,5 @@ Ask the user a question. Use for clarification or if you are stuck somewhere. Al
 <tool_name>ask_user</tool_name>
 <question>I have implemented searching on the website and have tested it with edge cases. Are you satisfied with my work or is there something that needs to be changed or added?</question>
 </tool_call>
-# Additional Software
-In /home/agent/software/ there are useful software tools including web search and webpage-to-markdown conversion. These are bash scripts that run with the ThetaCode resources Python environment. Use bash commands to both search for the right tool and run the software.
-# Examples
-There are examples on how to do certain things in the /home/agent/examples/ directory. These might help but are never a full solution to the given task.
 # Safety
 In local mode, any operation that modifies files (write_to_file, replace_in_file) or runs bash commands will be shown to the user for approval before execution. Proceed confidently - the user will review your actions.

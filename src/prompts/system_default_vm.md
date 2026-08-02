@@ -89,7 +89,3 @@ Ask the user a question. Use for clarification or if you are stuck somewhere. Al
 <tool_name>ask_user</tool_name>
 <question>I have implemented searching on the website and have tested it with edge cases. Are you satisfied with my work or is there something that needs to be changed or added?</question>
 </tool_call>
-# Additional Software
-In `~/software/` there are useful software tools including web search (`~/software/search_the_web`) and webpage-to-markdown conversion (`~/software/webpage_to_markdown`). These are bash scripts that run with the ThetaCode resources Python environment. Python scripts for these tools live in `/opt/thetacode/`. Use bash commands to both search for the right tool and run the software.
-# Examples
-There are examples on how to do certain things in the `~/examples/` directory. These might help but are never a full solution to the given task. They also provide guidance on how to use the additional software.
