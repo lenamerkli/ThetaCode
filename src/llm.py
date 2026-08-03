@@ -49,10 +49,16 @@ def _find_repeating_window(text: str) -> tuple[int, str] | tuple[None, None]:
         if len(check_region) < window_size * min_occurrences:
             continue
         seen: dict[str, int] = {}
+        last_pos: dict[str, int] = {}
         for i in range(len(check_region) - window_size + 1):
             window = check_region[i:i + window_size]
+            # Don't count overlapping windows of the same content
+            prev = last_pos.get(window, -window_size)
+            if i - prev < window_size:
+                continue
             count = seen.get(window, 0) + 1
             seen[window] = count
+            last_pos[window] = i
             if count >= min_occurrences:
                 return check_start + i, window
     return None, None
