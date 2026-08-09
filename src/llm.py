@@ -1,4 +1,5 @@
 import threading
+import uuid
 from abc import ABC, abstractmethod
 from requests import request
 from os import environ
@@ -8,6 +9,7 @@ import typing as t
 from importlib.util import find_spec
 
 from toolcall_repair import repair
+from tool_definitions import get_tools, supports_official_tool_calling
 
 # App attribution for OpenRouter — these headers identify ThetaCode in
 # OpenRouter's public rankings and analytics.
@@ -27,9 +29,10 @@ REPETITION_RULES = [
 ]
 
 
-T_CONVERSATION = t.List[t.Dict[str, str]]
-T_COMPLETION = t.Dict[str, t.Union[str, int, float]]
+T_CONVERSATION = t.List[t.Dict[str, t.Any]]
+T_COMPLETION = t.Dict[str, t.Union[str, int, float, list, None]]
 T_STREAM_CALLBACK = t.Callable[[str], None]
+T_TOOL_CALL = t.Dict[str, t.Any]
 
 
 def _find_repeating_window(text: str) -> tuple[int, str] | tuple[None, None]:
@@ -95,7 +98,7 @@ class LLM(ABC):
         self.model = model
 
     @abstractmethod
-    def generate(self, conversation: T_CONVERSATION) -> T_COMPLETION:
+    def generate(self, conversation: T_CONVERSATION, use_official_tools: bool = False) -> T_COMPLETION:
         pass
 
     @abstractmethod
@@ -104,13 +107,220 @@ class LLM(ABC):
         conversation: T_CONVERSATION,
         on_token: T_STREAM_CALLBACK,
         cancel_event: t.Optional[threading.Event] = None,
+        use_official_tools: bool = False,
     ) -> T_COMPLETION:
         """Stream tokens via on_token(content), return the final T_COMPLETION dict.
         
         If ``cancel_event`` is set, the stream is aborted early and a partial
         T_COMPLETION is returned with whatever was accumulated so far.
+        
+        If ``use_official_tools`` is True, the request uses OpenAI-style tool
+        calling and the response may contain ``tool_calls`` instead of text.
         """
         pass
+
+
+# ---------------------------------------------------------------------------
+# Format conversion utilities (official <-> legacy XML)
+# ---------------------------------------------------------------------------
+
+def tool_calls_to_xml(tool_calls: list[T_TOOL_CALL]) -> str:
+    """Convert official tool_calls to legacy XML format.
+    
+    Args:
+        tool_calls: List of tool call dicts in OpenAI format:
+            [{"id": "...", "type": "function", "function": {"name": "...", "arguments": "{...}"}}]
+    
+    Returns:
+        XML string with <tool_call> blocks.
+    """
+    parts = []
+    for tc in tool_calls:
+        func = tc.get('function', {})
+        name = func.get('name', '')
+        try:
+            args = json.loads(func.get('arguments', '{}'))
+        except json.JSONDecodeError:
+            args = {}
+        
+        lines = ['<tool_call>', f'<tool_name>{name}</tool_name>']
+        for key, value in args.items():
+            lines.append(f'<{key}>{value}</{key}>')
+        lines.append('</tool_call>')
+        parts.append('\n'.join(lines))
+    return '\n'.join(parts)
+
+
+def xml_to_tool_calls(content: str) -> tuple[str, list[T_TOOL_CALL]]:
+    """Parse legacy XML tool calls from content and convert to official format.
+    
+    Args:
+        content: Text that may contain <tool_call> XML blocks.
+        
+    Returns:
+        Tuple of (text_content_without_tool_calls, list_of_tool_calls).
+        The tool_calls are in OpenAI format with generated IDs.
+    """
+    import re
+    
+    tool_calls = []
+    # Find all tool_call blocks
+    pattern = r'<tool_call>(.*?)</tool_call>'
+    matches = list(re.finditer(pattern, content, re.DOTALL))
+    
+    if not matches:
+        return content, []
+    
+    # Extract text before first tool call
+    text_before = content[:matches[0].start()].strip()
+    
+    for match in matches:
+        block = match.group(1)
+        
+        # Extract tool name
+        name_match = re.search(r'<tool_name>(.*?)</tool_name>', block, re.DOTALL)
+        if not name_match:
+            continue
+        tool_name = name_match.group(1).strip()
+        
+        # Extract parameters (any tag that's not tool_name)
+        args = {}
+        param_pattern = r'<(\w+)>(.*?)</\1>'
+        for param_match in re.finditer(param_pattern, block, re.DOTALL):
+            param_name = param_match.group(1)
+            if param_name != 'tool_name':
+                args[param_name] = param_match.group(2).strip()
+        
+        tool_calls.append({
+            'id': f'call_{uuid.uuid4().hex[:24]}',
+            'type': 'function',
+            'function': {
+                'name': tool_name,
+                'arguments': json.dumps(args)
+            }
+        })
+    
+    return text_before, tool_calls
+
+
+def convert_message_to_official(msg: dict) -> dict:
+    """Convert a single message from legacy format to official format.
+    
+    Handles:
+    - Assistant messages with XML tool calls -> tool_calls field
+    - User messages with <tool_response> -> role: "tool"
+    
+    Args:
+        msg: Message dict with role/content.
+        
+    Returns:
+        Message dict in official format.
+    """
+    role = msg.get('role', '')
+    content = msg.get('content', '')
+    result = dict(msg)
+    
+    if role == 'assistant' and '<tool_call>' in content:
+        # Parse XML tool calls
+        text_content, tool_calls = xml_to_tool_calls(content)
+        if tool_calls:
+            result['content'] = text_content if text_content else None
+            result['tool_calls'] = tool_calls
+    
+    elif role == 'user' and content.lstrip().startswith('<tool_response>'):
+        # Convert tool response to official format
+        # Extract the content between tags
+        import re
+        match = re.search(r'<tool_response>\s*(.*?)\s*</tool_response>', content, re.DOTALL)
+        if match:
+            result['role'] = 'tool'
+            result['content'] = match.group(1)
+            # tool_call_id will be set by the caller based on context
+            # We mark it for later processing
+            result['_needs_tool_call_id'] = True
+    
+    return result
+
+
+def convert_message_to_legacy(msg: dict) -> dict:
+    """Convert a single message from official format to legacy XML format.
+    
+    Handles:
+    - Assistant messages with tool_calls -> XML in content
+    - Tool messages -> user messages with <tool_response>
+    
+    Args:
+        msg: Message dict in official format.
+        
+    Returns:
+        Message dict in legacy format.
+    """
+    role = msg.get('role', '')
+    result = dict(msg)
+    
+    if role == 'assistant' and msg.get('tool_calls'):
+        # Convert tool_calls to XML
+        xml_content = tool_calls_to_xml(msg['tool_calls'])
+        existing_content = msg.get('content') or ''
+        result['content'] = (existing_content + '\n' + xml_content).strip() if existing_content else xml_content
+        result.pop('tool_calls', None)
+    
+    elif role == 'tool':
+        # Convert to user message with tool_response tags
+        result['role'] = 'user'
+        result['content'] = f'<tool_response>\n{msg.get("content", "")}\n</tool_response>'
+        result.pop('tool_call_id', None)
+        result.pop('name', None)
+    
+    return result
+
+
+def convert_conversation_to_legacy(conversation: T_CONVERSATION) -> T_CONVERSATION:
+    """Convert an entire conversation from official to legacy format.
+    
+    Args:
+        conversation: List of messages in official format.
+        
+    Returns:
+        List of messages in legacy format.
+    """
+    return [convert_message_to_legacy(msg) for msg in conversation]
+
+
+def convert_conversation_to_official(conversation: T_CONVERSATION) -> T_CONVERSATION:
+    """Convert an entire conversation from legacy to official format.
+    
+    This also links tool responses to their corresponding tool calls.
+    
+    Args:
+        conversation: List of messages in legacy format.
+        
+    Returns:
+        List of messages in official format.
+    """
+    result = []
+    pending_tool_call_ids = []  # Queue of tool call IDs waiting for responses
+    
+    for msg in conversation:
+        converted = convert_message_to_official(msg)
+        
+        # Track tool calls for linking responses
+        if converted.get('role') == 'assistant' and converted.get('tool_calls'):
+            for tc in converted['tool_calls']:
+                pending_tool_call_ids.append(tc['id'])
+        
+        # Link tool responses to their calls
+        if converted.get('_needs_tool_call_id'):
+            converted.pop('_needs_tool_call_id', None)
+            if pending_tool_call_ids:
+                converted['tool_call_id'] = pending_tool_call_ids.pop(0)
+            else:
+                # Generate a placeholder ID if no matching call found
+                converted['tool_call_id'] = f'call_{uuid.uuid4().hex[:24]}'
+        
+        result.append(converted)
+    
+    return result
 
 
 class OpenRouterLLM(LLM):
@@ -152,17 +362,34 @@ class OpenRouterLLM(LLM):
             print(f"[Headroom] Compression skipped: {e}")
             return conversation
 
-    def generate(self, conversation: T_CONVERSATION) -> T_COMPLETION:
+    def generate(self, conversation: T_CONVERSATION, use_official_tools: bool = False) -> T_COMPLETION:
+        """Generate a completion from the LLM.
+        
+        Args:
+            conversation: List of message dicts.
+            use_official_tools: If True, use OpenAI-style tool calling.
+            
+        Returns:
+            Dict with 'text', 'cost', 'thinking', and optionally 'tool_calls'.
+        """
         conversation = self._compress_conversation(conversation)
         model_name = self.model.replace('OpenRouter', '').replace('openrouter', '')
         if model_name[0] == '/':
             model_name = model_name[1:]
-        data = {
+        
+        data: dict[str, t.Any] = {
             'model': model_name,
             'messages': conversation,
-            'stop': ['</tool_call>'],
             'provider': {'sort': 'price'},
         }
+        
+        if use_official_tools:
+            # Official tool calling: include tools, no stop sequence
+            data['tools'] = get_tools()
+        else:
+            # Legacy XML mode: use stop sequence for tool_call tag
+            data['stop'] = ['</tool_call>']
+        
         print('=' * 30 + ' Begin OpenRouter Request ' + '=' * 30)
         print(data)
         print('=' * 30 + ' End OpenRouter Request ' + '=' * 30)
@@ -185,25 +412,40 @@ class OpenRouterLLM(LLM):
         print(response_json)
         print('=' * 30 + ' End OpenRouter Response ' + '=' * 30)
         message = response_json["choices"][0]["message"]
-        message['content'] = message.get('content', '')
-        if ('<tool_call>' in message['content']) and ('</tool_call>' not in message['content']):
-            message['content'] += '</tool_call>'
-        return {
-            'text': message['content'],
+        
+        result: T_COMPLETION = {
+            'text': message.get('content', '') or '',
             'cost': response_json.get('usage', {}).get('cost', 0.0),
             'thinking': message.get('reasoning', ''),
         }
+        
+        if use_official_tools:
+            # Handle official tool calls
+            if message.get('tool_calls'):
+                result['tool_calls'] = message['tool_calls']
+        else:
+            # Legacy XML mode: repair malformed tool calls
+            content = result['text']
+            if ('<tool_call>' in content) and ('</tool_call>' not in content):
+                content += '</tool_call>'
+            result['text'] = content
+        
+        return result
 
     def generate_stream(
         self,
         conversation: T_CONVERSATION,
         on_token: T_STREAM_CALLBACK,
         cancel_event: t.Optional[threading.Event] = None,
+        use_official_tools: bool = False,
     ) -> T_COMPLETION:
         """Stream tokens via on_token(content) and return the final T_COMPLETION.
         
         If ``cancel_event`` is set, the stream is aborted early and a partial
         T_COMPLETION is returned with whatever was accumulated so far.
+        
+        If ``use_official_tools`` is True, the request uses OpenAI-style tool
+        calling and the response may contain ``tool_calls`` instead of text.
         """
         # Compress before streaming
         conversation = self._compress_conversation(conversation)
@@ -215,17 +457,25 @@ class OpenRouterLLM(LLM):
         model_name = self.model.replace('OpenRouter', '').replace('openrouter', '')
         if model_name[0] == '/':
             model_name = model_name[1:]
+        
         data: dict[str, t.Any] = {
             'model': model_name,
             'messages': conversation,
             'stream': True,
-            'stop': ['</tool_call>'],
             'provider': {'sort': 'price'},
         }
-        if model_name == 'z-ai/glm-5.2':
-            data['stop'].extend(['</invoke>', '</parameter>', '<parameter'])
+        
+        if use_official_tools:
+            # Official tool calling: include tools, no stop sequence
+            data['tools'] = get_tools()
+        else:
+            # Legacy XML mode: use stop sequence for tool_call tag
+            data['stop'] = ['</tool_call>']
+            if model_name == 'z-ai/glm-5.2':
+                data['stop'].extend(['</invoke>', '</parameter>', '<parameter'])
+        
         print('=' * 30 + ' Begin OpenRouter Streaming Request ' + '=' * 30)
-        print({'model': model_name, 'messages': f'[{len(conversation)} messages]', 'stream': True})
+        print({'model': model_name, 'messages': f'[{len(conversation)} messages]', 'stream': True, 'official_tools': use_official_tools})
         print('=' * 30 + ' End OpenRouter Streaming Request ' + '=' * 30)
 
         stream_request_headers = {
@@ -249,6 +499,10 @@ class OpenRouterLLM(LLM):
         full_content = ""
         full_thinking = ""
         total_cost = 0.0
+        
+        # For official tool calling: accumulate tool call chunks
+        # Tool calls arrive as deltas with index, id, function.name, function.arguments
+        tool_calls_acc: dict[int, dict] = {}  # index -> accumulated tool call
 
         buffer = bytearray()
         stream_finished = False
@@ -312,6 +566,25 @@ class OpenRouterLLM(LLM):
 
                         if thinking:
                             full_thinking += thinking
+                        
+                        # Accumulate tool calls (official mode)
+                        if use_official_tools and delta.get('tool_calls'):
+                            for tc_delta in delta['tool_calls']:
+                                idx = tc_delta.get('index', 0)
+                                if idx not in tool_calls_acc:
+                                    tool_calls_acc[idx] = {
+                                        'id': tc_delta.get('id', ''),
+                                        'type': 'function',
+                                        'function': {'name': '', 'arguments': ''}
+                                    }
+                                tc = tool_calls_acc[idx]
+                                if tc_delta.get('id'):
+                                    tc['id'] = tc_delta['id']
+                                func_delta = tc_delta.get('function', {})
+                                if func_delta.get('name'):
+                                    tc['function']['name'] += func_delta['name']
+                                if func_delta.get('arguments'):
+                                    tc['function']['arguments'] += func_delta['arguments']
 
                         # Grab usage/cost from any chunk that includes it
                         usage = chunk.get('usage', {}) or {}
@@ -336,14 +609,25 @@ class OpenRouterLLM(LLM):
                 response.close()
 
         print('\n' + '=' * 30 + ' End OpenRouter Streaming Response ' + '=' * 30)
-        if ('<tool_call>' in full_content) and ('</tool_call>' not in full_content):
-            full_content += '</tool_call>'
-        full_content = repair(full_content)
-        return {
+        
+        result: T_COMPLETION = {
             "text": full_content,
             "cost": total_cost,
             "thinking": full_thinking,
         }
+        
+        if use_official_tools:
+            # Return accumulated tool calls
+            if tool_calls_acc:
+                result['tool_calls'] = [tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())]
+        else:
+            # Legacy XML mode: repair malformed tool calls
+            if ('<tool_call>' in full_content) and ('</tool_call>' not in full_content):
+                full_content += '</tool_call>'
+            full_content = repair(full_content)
+            result['text'] = full_content
+        
+        return result
 
 
 def get_llm(model: str, headroom_enabled: bool = False) -> LLM:

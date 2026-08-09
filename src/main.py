@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import threading
@@ -8,8 +9,13 @@ from time import sleep
 from docker import Docker, CONTAINER_IP
 from local_executor import LocalExecutor, RESOURCES_DIR
 from requests import request
-from llm import T_CONVERSATION, T_STREAM_CALLBACK, load_prompt, LLM
+from llm import (
+    T_CONVERSATION, T_STREAM_CALLBACK, load_prompt, LLM,
+    convert_conversation_to_legacy, convert_conversation_to_official,
+    tool_calls_to_xml, xml_to_tool_calls,
+)
 from toolcall_repair import repair
+from tool_definitions import supports_official_tool_calling, get_tools
 
 
 class Project:
@@ -235,9 +241,11 @@ class Chat:
     def restore_messages(self, stored_messages: list[dict]):
         """Rebuild _conversation from rows fetched out of the DB.
 
-        Stored messages use the same role/content/thinking keys but may not
-        include all internal fields.  We reconstruct a clean conversation list
-        that the LLM can continue from.
+        Stored messages are in official tool calling format:
+        - Assistant messages may have 'tool_calls' (list of dicts)
+        - Tool results have role='tool' with 'tool_call_id' and 'name'
+        
+        We reconstruct a clean conversation list that the LLM can continue from.
         """
         # Always keep a system placeholder at index 0; it will be overwritten
         # on the next LLM call.
@@ -249,6 +257,10 @@ class Chat:
             thinking = msg.get('thinking', '')
             cost = msg.get('cost', 0.0)
             llm_model = msg.get('llm_model', '')
+            tool_calls = msg.get('tool_calls')
+            tool_call_id = msg.get('tool_call_id', '')
+            name = msg.get('name', '')
+            
             if role == 'system':
                 self._conversation[0] = {'role': 'system', 'content': content}
             else:
@@ -260,16 +272,40 @@ class Chat:
                     self._cost += cost
                 if llm_model:
                     entry['llm'] = llm_model
+                # Official tool calling fields
+                if tool_calls:
+                    entry['tool_calls'] = tool_calls
+                if tool_call_id:
+                    entry['tool_call_id'] = tool_call_id
+                if name:
+                    entry['name'] = name
                 self._conversation.append(entry)
 
-    def _set_system_message(self, llm: LLM):
+    def _set_system_message(self, llm: LLM, use_official_tools: bool = False):
+        """Set the system message based on project mode and tool calling format.
+        
+        Args:
+            llm: The LLM instance (used to determine model).
+            use_official_tools: If True, use prompts without XML tool call instructions.
+        """
         if self._project.mode == 'local':
-            prompt_name = 'system_default_local'
+            prompt_name = 'system_default_local_official' if use_official_tools else 'system_default_local'
         elif self._project.mode == 'vm':
-            prompt_name = 'system_default_vm'
+            prompt_name = 'system_default_vm_official' if use_official_tools else 'system_default_vm'
         else:
-            prompt_name = 'system_default'
-        content = load_prompt(prompt_name).replace('%%project_name%%', self._project.name)
+            prompt_name = 'system_default_official' if use_official_tools else 'system_default'
+        
+        try:
+            content = load_prompt(prompt_name).replace('%%project_name%%', self._project.name)
+        except FileNotFoundError:
+            # Fall back to legacy prompt if official prompt doesn't exist
+            if self._project.mode == 'local':
+                prompt_name = 'system_default_local'
+            elif self._project.mode == 'vm':
+                prompt_name = 'system_default_vm'
+            else:
+                prompt_name = 'system_default'
+            content = load_prompt(prompt_name).replace('%%project_name%%', self._project.name)
         if self._project.mode == 'vm':
             content = content.replace('%%project_path%%', self._project.original_path or self._project.path)
         if not content.endswith('\n'):
@@ -396,7 +432,19 @@ class Chat:
         via ``generate_stream()``.  Otherwise a single ``generate()`` call is used.
 
         ``cancel_event``, when set, aborts streaming requests and exits the loop.
+        
+        The conversation is stored internally in official tool calling format:
+        - Assistant messages may have 'tool_calls' (list of dicts)
+        - Tool results have role='tool' with 'tool_call_id'
+        
+        For models that don't support official tool calling, the conversation
+        is converted to legacy XML format on-the-fly for the API request.
         """
+        # Determine if this model supports official tool calling
+        use_official_tools = supports_official_tool_calling(llm.model)
+        
+        # Set the appropriate system message
+        self._set_system_message(llm, use_official_tools)
 
         MAX_ITERATIONS = 200  # safety guard against infinite loops
         iters = 0
@@ -406,26 +454,58 @@ class Chat:
             if cancel_event and cancel_event.is_set():
                 for msg in reversed(self._conversation):
                     if msg['role'] == 'assistant':
-                        return msg['content']
+                        return msg.get('content', '') or ''
                 return ''
 
             iters += 1
             last = self._conversation[-1]
 
-            if last['role'] == 'user':
+            # Determine if we need to call the LLM
+            needs_llm_call = last['role'] in ('user', 'system', 'tool')
+
+            if needs_llm_call:
+                # Prepare conversation for the API
+                if use_official_tools:
+                    # Use official format directly
+                    api_conversation = self._conversation
+                else:
+                    # Convert to legacy XML format
+                    api_conversation = convert_conversation_to_legacy(self._conversation)
+                
                 # Ask the LLM for a response — stream if a token callback is given.
                 if on_token is not None:
-                    response = llm.generate_stream(self._conversation, on_token, cancel_event=cancel_event)
+                    response = llm.generate_stream(
+                        api_conversation, on_token, cancel_event=cancel_event,
+                        use_official_tools=use_official_tools
+                    )
                 else:
-                    response = llm.generate(self._conversation)
+                    response = llm.generate(api_conversation, use_official_tools=use_official_tools)
+                
                 self._cost += response['cost']
-                assistant_entry = {
+                
+                # Build assistant entry in official format
+                assistant_entry: dict = {
                     'role': 'assistant',
-                    'content': repair(response['text']),
+                    'content': response['text'],
                     'thinking': response['thinking'],
                     'cost': response['cost'],
                     'llm': llm.model,
                 }
+                
+                if use_official_tools:
+                    # Official mode: tool_calls come from the API response
+                    if response.get('tool_calls'):
+                        assistant_entry['tool_calls'] = response['tool_calls']
+                else:
+                    # Legacy mode: parse XML tool calls from content and convert to official format
+                    content = repair(response['text'])
+                    text_content, tool_calls = xml_to_tool_calls(content)
+                    if tool_calls:
+                        assistant_entry['content'] = text_content
+                        assistant_entry['tool_calls'] = tool_calls
+                    else:
+                        assistant_entry['content'] = content
+                
                 self._conversation.append(assistant_entry)
                 if on_new_message:
                     on_new_message(assistant_entry)
@@ -433,39 +513,43 @@ class Chat:
                 continue
 
             # Last message is from the assistant – check for a tool call.
-            content = last['content']
-            if '<tool_call>' not in content or '</tool_call>' not in content:
-                no_tool_entry = {'role': 'user', 'content': self._get_next_tool_call_parsing_error()}
+            tool_calls = last.get('tool_calls')
+            
+            if not tool_calls:
+                # No tool call - use no_tool_call.md prompt
+                no_tool_entry = {'role': 'user', 'content': load_prompt('no_tool_call')}
                 self._conversation.append(no_tool_entry)
                 if on_new_message:
                     on_new_message(no_tool_entry)
                 continue
 
-            options = content.split('<tool_call>', 1)[-1].rsplit('</tool_call>', 1)[0].strip()
-
-            if '<tool_name>' not in content or '</tool_name>' not in options:
-                # Malformed tool call
-                err_entry = {'role': 'user', 'content': self._get_next_tool_call_parsing_error()}
-                self._conversation.append(err_entry)
-                if on_new_message:
-                    on_new_message(err_entry)
-                continue
-
-            tool_name = options.split('<tool_name>', 1)[-1].rsplit('</tool_name>', 1)[0].strip()
+            # Process the first tool call (single tool call per turn)
+            tool_call = tool_calls[0]
+            tool_call_id = tool_call.get('id', '')
+            func = tool_call.get('function', {})
+            tool_name = func.get('name', '')
+            
+            try:
+                tool_args = json.loads(func.get('arguments', '{}'))
+            except json.JSONDecodeError:
+                tool_args = {}
 
             if tool_name == 'ask_user':
                 return Chat.WAITING_FOR_USER
 
-            # Execute the tool.
-            tool_response = self._dispatch_tool(tool_name, options)
+            # Execute the tool using the args dict
+            tool_response = self._dispatch_tool_from_args(tool_name, tool_args)
             if tool_response == Chat.NEEDS_APPROVAL:
                 # Approval was denied by the user — return the last answer
                 self._conversation[-1]['_approval_denied'] = True
                 return f"[User denied the {tool_name} operation.]"
+            
+            # Store tool result in official format
             tool_entry = {
-                'role': 'user',
-                'content': f'<tool_response>\n{tool_response}\n</tool_response>',
-                '_tool_name': tool_name,
+                'role': 'tool',
+                'content': tool_response,
+                'tool_call_id': tool_call_id,
+                'name': tool_name,
             }
             self._conversation.append(tool_entry)
             if on_new_message:
@@ -474,12 +558,91 @@ class Chat:
         # Safety: if we hit MAX_ITERATIONS return last assistant content.
         for msg in reversed(self._conversation):
             if msg['role'] == 'assistant':
-                return msg['content']
+                return msg.get('content', '') or ''
         return ''
 
     # ------------------------------------------------------------------
     # Tool dispatch
     # ------------------------------------------------------------------
+
+    def _dispatch_tool_from_args(self, tool_name: str, args: dict) -> str:
+        """Dispatch a tool call using arguments from official tool calling format.
+        
+        Args:
+            tool_name: Name of the tool to call.
+            args: Dictionary of tool arguments.
+            
+        Returns:
+            Tool response string, or NEEDS_APPROVAL if approval is required.
+        """
+        # In local mode, bash and write_to_file require user approval
+        if self._project.mode == 'local' and self._on_approval_needed:
+            if tool_name in ('bash', 'write_to_file'):
+                command = args.get('command', '')
+                path = args.get('path', '')
+                content = args.get('content', '')
+
+                if tool_name == 'bash' and command:
+                    preview = f"Command: {command}"
+                elif tool_name == 'write_to_file' and path:
+                    preview = f"Write file: {path}\nContent: {content[:500]}..."
+                else:
+                    preview = f"{tool_name} operation"
+
+                result = self._on_approval_needed(tool_name, preview)
+                if result == 'denied':
+                    return Chat.NEEDS_APPROVAL
+                # approved — fall through to execute
+            elif tool_name == 'replace_in_file':
+                path = args.get('path', '')
+                if path:
+                    search = args.get('search', '')
+                    preview = f"Edit file: {path}\nSearch: {search[:200]}..."
+                    result = self._on_approval_needed(tool_name, preview)
+                    if result == 'denied':
+                        return Chat.NEEDS_APPROVAL
+
+        match tool_name:
+            case 'read_file':
+                path = args.get('path', '')
+                if not path:
+                    return 'Error: Missing required parameter: path'
+                start_line = int(args.get('start_line', 1) or 1)
+                end_line = int(args.get('end_line', 1000) or 1000)
+                start_char = int(args.get('start_char', 0) or 0)
+                end_char = int(args.get('end_char', 100000) or 100000)
+                max_chars = int(args.get('max_chars', 1000000) or 1000000)
+                return self._tool_read_file(path, start_line, end_line, start_char, end_char, max_chars)
+            case 'write_to_file':
+                path = args.get('path', '')
+                content = args.get('content', '')
+                if not path:
+                    return 'Error: Missing required parameter: path'
+                if not content:
+                    return 'Error: Missing required parameter: content'
+                return self._tool_write_to_file(path, content)
+            case 'replace_in_file':
+                path = args.get('path', '')
+                search = args.get('search', '')
+                replace = args.get('replace', '')
+                if not path:
+                    return 'Error: Missing required parameter: path'
+                if not search:
+                    return 'Error: Missing required parameter: search'
+                if not replace:
+                    return 'Error: Missing required parameter: replace'
+                return self._tool_replace_in_file(path, search, replace)
+            case 'bash':
+                command = args.get('command', '')
+                if not command:
+                    return 'Error: Missing required parameter: command'
+                timeout = int(args.get('timeout', 60) or 60)
+                directory = args.get('directory', '/home/agent/')
+                venv = args.get('venv', '')
+                max_chars = int(args.get('max_chars', 100000) or 100000)
+                return self._tool_bash(command, timeout, directory, venv, max_chars)
+            case _:
+                return f'Unknown tool: {tool_name}'
 
     def _dispatch_tool(self, tool_name: str, options: str) -> str:
         # In local mode, bash and write_to_file require user approval

@@ -56,6 +56,7 @@ def _msg_bgcolor(role: str) -> str:
     return {
         "user": "#1a3a5c",
         "assistant": "#3a2a5c",
+        "tool": "#2d3d2d",  # Green-ish for tool results
     }.get(role, "#2d2d2d")
 
 
@@ -68,6 +69,9 @@ def _role_label(msg: dict) -> str:
         return "You"
     if role == "assistant":
         return "AI (question)" if msg.get("_ask_user") else "AI"
+    if role == "tool":
+        tool_name = msg.get("name", "")
+        return f"Tool Result ({tool_name})" if tool_name else "Tool Result"
     return role.capitalize()
 
 
@@ -478,6 +482,8 @@ class ThetaCodeApp:
                 bubble_tag = "bubble_tool"
             else:
                 bubble_tag = "bubble_user"
+        elif role == "tool":
+            bubble_tag = "bubble_tool"
         else:
             bubble_tag = "bubble_ai"
         text_widget.insert(tk.END, f"{label}\n", (bubble_tag, "role_label"))
@@ -1371,8 +1377,10 @@ class ThetaCodeApp:
         def on_new_msg(msg: dict):
             role = msg.get("role", "")
             if role == "assistant":
-                content = msg.get("content", "")
-                if "<tool_call>" in content and "</tool_call>" in content:
+                # Check for tool calls (official format) or XML (legacy format)
+                content = msg.get("content", "") or ""
+                has_tool_calls = msg.get("tool_calls") or ("<tool_call>" in content and "</tool_call>" in content)
+                if has_tool_calls:
                     state.stream_queue.put(("assistant_tool", msg))
                 else:
                     state.stream_queue.put(("assistant_no_tool", msg))
@@ -1430,8 +1438,10 @@ class ThetaCodeApp:
         def on_new_msg(msg: dict):
             role = msg.get("role", "")
             if role == "assistant":
-                content = msg.get("content", "")
-                if "<tool_call>" in content and "</tool_call>" in content:
+                # Check for tool calls (official format) or XML (legacy format)
+                content = msg.get("content", "") or ""
+                has_tool_calls = msg.get("tool_calls") or ("<tool_call>" in content and "</tool_call>" in content)
+                if has_tool_calls:
                     state.stream_queue.put(("assistant_tool", msg))
                 else:
                     state.stream_queue.put(("assistant_no_tool", msg))
@@ -1488,6 +1498,7 @@ class ThetaCodeApp:
                             chat_id=chat_id, role="assistant",
                             content=msg.get("content", ""), thinking=msg.get("thinking", "") or "",
                             cost=msg.get("cost", 0.0) or 0.0, llm_model=msg.get("llm", "") or "",
+                            tool_calls=msg.get("tool_calls"),
                         )
                         ph = state.current_stream_placeholder
                         if ph:
@@ -1500,6 +1511,7 @@ class ThetaCodeApp:
                             chat_id=chat_id, role="assistant",
                             content=msg.get("content", ""), thinking=msg.get("thinking", "") or "",
                             cost=msg.get("cost", 0.0) or 0.0, llm_model=msg.get("llm", "") or "",
+                            tool_calls=msg.get("tool_calls"),
                         )
                         ph = state.current_stream_placeholder
                         if ph:
@@ -1562,6 +1574,9 @@ class ThetaCodeApp:
                 chat_id=chat_id, role=role, content=msg.get("content", ""),
                 thinking=msg.get("thinking", "") or "", cost=msg.get("cost", 0.0) or 0.0,
                 llm_model=msg.get("llm", "") or "",
+                tool_calls=msg.get("tool_calls"),
+                tool_call_id=msg.get("tool_call_id", ""),
+                name=msg.get("name", ""),
             )
         self._add_message_bubble(msg, chat_state=chat_state)
         self._update_chat_cost(chat_state)

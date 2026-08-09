@@ -1,0 +1,23 @@
+{
+  "official_tool_calling_models": [
+    "OpenRouter/inclusionai/ling-3.0-tiny:free",
+    "OpenRouter/qwen/qwen3.8-max",
+    "OpenRouter/poolside/laguna-s-2.1:free",
+    "OpenRouter/poolside/laguna-s-2.1",
+    "OpenRouter/inclusionai/ling-3.0-flash",
+    "OpenRouter/moonshotai/kimi-k3",
+    "OpenRouter/tencent/hy3",
+    "OpenRouter/poolside/laguna-xs-2.1:free",
+    "OpenRouter/poolside/laguna-xs-2.1",
+    "OpenRouter/cohere/north-mini-code:free",
+    "OpenRouter/z-ai/glm-5.2",
+    "OpenRouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "OpenRouter/qwen/qwen3.7-plus",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+  ],
+  "wildcard_patterns": [
+    "OpenRouter/openai/*",
+    "OpenRouter/anthropic/*",
+    "OpenRouter/deepseek/deepseek-v4*"
+  ]
+}
