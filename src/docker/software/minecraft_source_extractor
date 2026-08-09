@@ -1,0 +1,8 @@
+#!/bin/bash
+
+# Allow Python version to be overridden via environment variable
+THETACODE_PYTHON_VERSION="${THETACODE_PYTHON_VERSION:-/usr/bin/python3}"
+THETACODE_PYTHON_SCRIPT="/opt/thetacode/minecraft_source_extractor.py"
+
+# Execute
+"$THETACODE_PYTHON_VERSION" "$THETACODE_PYTHON_SCRIPT" "$@"
