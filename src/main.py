@@ -537,6 +537,14 @@ class Chat:
             if tool_name == 'ask_user':
                 return Chat.WAITING_FOR_USER
 
+            # Log the tool call to stdout
+            print(f"\n[Tool Call] {tool_name}")
+            for key, value in tool_args.items():
+                val_str = str(value)
+                if len(val_str) > 200:
+                    val_str = val_str[:200] + '...'
+                print(f"  {key}: {val_str}")
+
             # Execute the tool using the args dict
             tool_response = self._dispatch_tool_from_args(tool_name, tool_args)
             if tool_response == Chat.NEEDS_APPROVAL:
@@ -544,6 +552,12 @@ class Chat:
                 self._conversation[-1]['_approval_denied'] = True
                 return f"[User denied the {tool_name} operation.]"
             
+            # Log the tool result to stdout
+            result_summary = tool_response[:300].replace('\n', '\\n')
+            if len(tool_response) > 300:
+                result_summary += '...'
+            print(f"[Tool Result] {tool_name}: {result_summary}\n")
+
             # Store tool result in official format
             tool_entry = {
                 'role': 'tool',

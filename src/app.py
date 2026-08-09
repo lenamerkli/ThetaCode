@@ -383,6 +383,9 @@ class ThetaCodeApp:
         text_widget.tag_configure("bubble_tool", background=BG_SURFACE_CONTAINER,
                                   lmargin1=10, lmargin2=10, rmargin=10,
                                   spacing1=4, spacing3=4, wrap=tk.WORD)
+        text_widget.tag_configure("bubble_tool_call", background="#2a3a4a",
+                                  lmargin1=10, lmargin2=10, rmargin=10,
+                                  spacing1=4, spacing3=4, wrap=tk.WORD)
         text_widget.tag_configure("bubble_error", background="#5c2a2a",
                                   lmargin1=10, lmargin2=10, rmargin=10,
                                   spacing1=4, spacing3=4, wrap=tk.WORD)
@@ -510,6 +513,40 @@ class ThetaCodeApp:
         text_widget.insert(tk.END, f"{content}\n", (bubble_tag, "content"))
         if cost > 0:
             text_widget.insert(tk.END, f"${cost:.6f}\n", (bubble_tag, "cost_label"))
+        text_widget.insert(tk.END, "\n")
+        text_widget.configure(state=tk.DISABLED)
+        text_widget.see(tk.END)
+
+    def _add_tool_call_bubble(self, msg: dict, chat_state: _ChatState | None = None):
+        """Insert a compact tool call indicator bubble showing the tool name and key args."""
+        if chat_state is None:
+            chat_state = self._get_active_chat_state()
+            if not chat_state:
+                return
+        text_widget = chat_state.messages_text
+        tool_calls = msg.get("tool_calls", [])
+        if not tool_calls:
+            return
+        text_widget.configure(state=tk.NORMAL)
+        for tc in tool_calls:
+            func = tc.get("function", {})
+            tool_name = func.get("name", "unknown")
+            try:
+                args = json.loads(func.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                args = {}
+            # Build a compact summary of key arguments
+            arg_parts = []
+            for key, value in args.items():
+                val_str = str(value)
+                if len(val_str) > 80:
+                    val_str = val_str[:80] + "..."
+                arg_parts.append(f"{key}={val_str}")
+            arg_summary = ", ".join(arg_parts) if arg_parts else ""
+            if arg_summary:
+                arg_summary = f"  ({arg_summary})"
+            text_widget.insert(tk.END, f"🔧 {tool_name}{arg_summary}\n",
+                               ("bubble_tool_call", "content"))
         text_widget.insert(tk.END, "\n")
         text_widget.configure(state=tk.DISABLED)
         text_widget.see(tk.END)
@@ -1505,6 +1542,7 @@ class ThetaCodeApp:
                             self._finalize_streaming_bubble(ph, msg, chat_state=state)
                             self._update_chat_cost(state)
                         state.current_stream_placeholder = None
+                        self._add_tool_call_bubble(msg, chat_state=state)
                     elif action == "assistant_no_tool":
                         _, msg = item
                         self.storage.append_message(

@@ -566,6 +566,7 @@ class OpenRouterLLM(LLM):
 
                         if thinking:
                             full_thinking += thinking
+                            print(thinking, end="", flush=True)
                         
                         # Accumulate tool calls (official mode)
                         if use_official_tools and delta.get('tool_calls'):
