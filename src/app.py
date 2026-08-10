@@ -967,7 +967,12 @@ class ThetaCodeApp:
                         "role": msg["role"], "content": msg["content"],
                         "thinking": msg.get("thinking", ""), "cost": msg.get("cost", 0.0),
                         "llm": msg.get("llm_model", ""),
+                        "tool_calls": msg.get("tool_calls"),
                     }, chat_state=cs)
+                    if msg.get("tool_calls"):
+                        self._add_tool_call_bubble({
+                            "tool_calls": msg["tool_calls"],
+                        }, chat_state=cs)
                 if self.active_chat_id == chat_id:
                     self._sync_input_for_active_chat()
             self.root.after(0, _show)
