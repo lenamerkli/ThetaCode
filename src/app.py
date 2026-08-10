@@ -32,7 +32,7 @@ from local_executor import RESOURCES_DIR, RESOURCES_VENV  # noqa: E402
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4-flash-0731"
+DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4-flash-0731:deepinfra"
 SIDE_PANEL_WIDTH = 210
 
 # Dark theme colours

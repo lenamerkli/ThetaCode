@@ -327,6 +327,18 @@ class OpenRouterLLM(LLM):
     def __init__(self, model: str, headroom_enabled: bool = False):
         self.model = model
         self.headroom_enabled = headroom_enabled
+        # Parse optional :provider suffix from model name (e.g.
+        # 'openrouter/model-slug:deepinfra').  The provider controls
+        # OpenRouter's provider.order / allow_fallbacks routing.
+        temp = self.model
+        for prefix in ('OpenRouter/', 'openrouter/'):
+            if temp.startswith(prefix):
+                temp = temp[len(prefix):]
+                break
+        if ':' in temp:
+            self._provider = temp.split(':', 1)[1]
+        else:
+            self._provider = None
 
     @staticmethod
     def _attribution_headers() -> dict:
@@ -376,12 +388,20 @@ class OpenRouterLLM(LLM):
         model_name = self.model.replace('OpenRouter', '').replace('openrouter', '')
         if model_name[0] == '/':
             model_name = model_name[1:]
+        # Strip optional :provider suffix — it's handled via routing fields below
+        if ':' in model_name:
+            model_name = model_name.split(':', 1)[0]
         
         data: dict[str, t.Any] = {
             'model': model_name,
             'messages': conversation,
             'provider': {'sort': 'price'},
         }
+        if self._provider:
+            data['provider'] = {
+                'order': [self._provider],
+                'allow_fallbacks': False,
+            }
         
         if use_official_tools:
             # Official tool calling: include tools, no stop sequence
@@ -457,6 +477,9 @@ class OpenRouterLLM(LLM):
         model_name = self.model.replace('OpenRouter', '').replace('openrouter', '')
         if model_name[0] == '/':
             model_name = model_name[1:]
+        # Strip optional :provider suffix — it's handled via routing fields below
+        if ':' in model_name:
+            model_name = model_name.split(':', 1)[0]
         
         data: dict[str, t.Any] = {
             'model': model_name,
@@ -464,6 +487,11 @@ class OpenRouterLLM(LLM):
             'stream': True,
             'provider': {'sort': 'price'},
         }
+        if self._provider:
+            data['provider'] = {
+                'order': [self._provider],
+                'allow_fallbacks': False,
+            }
         
         if use_official_tools:
             # Official tool calling: include tools, no stop sequence
