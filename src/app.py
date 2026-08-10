@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from storage import Storage                        # noqa: E402
 from main import Project, ThetaCode, Chat          # noqa: E402
-from llm import get_llm, load_prompt               # noqa: E402
+from llm import get_llm, load_prompt, tool_calls_to_xml  # noqa: E402
 from merge import detect_changes, apply_changes, GitignoreMatcher, make_diff  # noqa: E402
 from local_executor import RESOURCES_DIR, RESOURCES_VENV  # noqa: E402
 
@@ -518,7 +518,7 @@ class ThetaCodeApp:
         text_widget.see(tk.END)
 
     def _add_tool_call_bubble(self, msg: dict, chat_state: _ChatState | None = None):
-        """Insert a compact tool call indicator bubble showing the tool name and key args."""
+        """Insert a tool call bubble showing the full legacy XML format."""
         if chat_state is None:
             chat_state = self._get_active_chat_state()
             if not chat_state:
@@ -528,25 +528,9 @@ class ThetaCodeApp:
         if not tool_calls:
             return
         text_widget.configure(state=tk.NORMAL)
-        for tc in tool_calls:
-            func = tc.get("function", {})
-            tool_name = func.get("name", "unknown")
-            try:
-                args = json.loads(func.get("arguments", "{}"))
-            except json.JSONDecodeError:
-                args = {}
-            # Build a compact summary of key arguments
-            arg_parts = []
-            for key, value in args.items():
-                val_str = str(value)
-                if len(val_str) > 80:
-                    val_str = val_str[:80] + "..."
-                arg_parts.append(f"{key}={val_str}")
-            arg_summary = ", ".join(arg_parts) if arg_parts else ""
-            if arg_summary:
-                arg_summary = f"  ({arg_summary})"
-            text_widget.insert(tk.END, f"🔧 {tool_name}{arg_summary}\n",
-                               ("bubble_tool_call", "content"))
+        xml_str = tool_calls_to_xml(tool_calls)
+        text_widget.insert(tk.END, "🔧 Tool Call\n", ("bubble_tool_call", "role_label"))
+        text_widget.insert(tk.END, f"{xml_str}\n", ("bubble_tool_call", "content"))
         text_widget.insert(tk.END, "\n")
         text_widget.configure(state=tk.DISABLED)
         text_widget.see(tk.END)

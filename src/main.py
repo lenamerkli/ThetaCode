@@ -537,13 +537,10 @@ class Chat:
             if tool_name == 'ask_user':
                 return Chat.WAITING_FOR_USER
 
-            # Log the tool call to stdout
-            print(f"\n[Tool Call] {tool_name}")
-            for key, value in tool_args.items():
-                val_str = str(value)
-                if len(val_str) > 200:
-                    val_str = val_str[:200] + '...'
-                print(f"  {key}: {val_str}")
+            # Log the tool call to stdout (legacy XML format)
+            print('\n' + '=' * 30 + ' Tool Call ' + '=' * 30)
+            print(tool_calls_to_xml(tool_calls))
+            print('=' * 30 + ' End Tool Call ' + '=' * 30)
 
             # Execute the tool using the args dict
             tool_response = self._dispatch_tool_from_args(tool_name, tool_args)
