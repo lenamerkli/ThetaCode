@@ -318,7 +318,7 @@ class Chat:
                     continue
                 name = script_path.name
                 if self._project.mode == 'vm':
-                    src_path = f"~/{name}"
+                    src_path = f"~/software/{name}"
                 else:
                     src_path = f'/home/agent/software/{name}'
                 software.append(src_path)
@@ -328,7 +328,7 @@ class Chat:
             for md_path in sorted(examples_dir.rglob('*.md')):
                 relative = str(md_path.relative_to(examples_dir))
                 if self._project.mode == 'vm':
-                    src_path = f'~/{relative}'
+                    src_path = f'~/examples/{relative}'
                 else:
                     src_path = f'/home/agent/examples/{relative}'
                 examples.append(src_path)
