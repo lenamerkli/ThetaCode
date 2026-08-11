@@ -535,6 +535,15 @@ class Chat:
                 tool_args = {}
 
             if tool_name == 'ask_user':
+                tool_entry = {
+                    'role': 'tool',
+                    'content': '',
+                    'tool_call_id': tool_call_id,
+                    'name': tool_name,
+                }
+                self._conversation.append(tool_entry)
+                if on_new_message:
+                    on_new_message(tool_entry)
                 return Chat.WAITING_FOR_USER
 
             # Log the tool call to stdout (legacy XML format)
