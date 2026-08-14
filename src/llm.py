@@ -648,7 +648,7 @@ class OpenRouterLLM(LLM):
         if use_official_tools:
             # Return accumulated tool calls
             if tool_calls_acc:
-                result['tool_calls'] = [tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())]
+                result['tool_calls'] = [tool_calls_acc[list(tool_calls_acc.keys())[0]]]
         else:
             # Legacy XML mode: repair malformed tool calls
             if ('<tool_call>' in full_content) and ('</tool_call>' not in full_content):
