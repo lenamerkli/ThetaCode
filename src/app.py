@@ -104,6 +104,7 @@ class _ChatState:
         self._poll_running = False  # avoid duplicate UI poll loops
         self.pending_approval: dict | None = None  # {tool_name, params}
         self.approval_event: threading.Event | None = None
+        self.repair_buttons: list = []  # keep embedded repair buttons alive
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +536,40 @@ class ThetaCodeApp:
         text_widget.configure(state=tk.DISABLED)
         text_widget.see(tk.END)
 
+    def _make_missing_tool_button(self, chat_state: _ChatState) -> tk.Button:
+        """Build the small repair button embedded in an error bubble."""
+        btn = tk.Button(
+            chat_state.messages_text,
+            text="➕ Add missing tool messages",
+            bg=BG_SURFACE_CONTAINER, fg=FG_TERTIARY,
+            relief=tk.FLAT, bd=0, font=("TkDefaultFont", 10),
+            activebackground="#2d3d5c", activeforeground=FG_TERTIARY,
+            cursor="hand2", padx=8, pady=2,
+            command=lambda: self._add_missing_tool_messages(chat_state),
+        )
+        chat_state.repair_buttons.append(btn)
+        return btn
+
+    def _add_missing_tool_messages(self, chat_state: _ChatState | None = None):
+        """Add empty tool messages for every assistant tool_call missing a result."""
+        if chat_state is None:
+            chat_state = self._get_active_chat_state()
+        if not chat_state or not chat_state.chat:
+            return
+        added = chat_state.chat.add_missing_tool_messages()
+        if not added:
+            prev = self._docker_label.cget("text")
+            self._docker_label.configure(text="No missing tool messages")
+            self.root.after(2000, lambda: self._docker_label.configure(text=prev))
+            return
+        for entry in added:
+            self._persist_and_show(entry, chat_state=chat_state)
+        prev = self._docker_label.cget("text")
+        n = len(added)
+        self._docker_label.configure(
+            text=f"Added {n} missing tool message{'s' if n != 1 else ''} ✓")
+        self.root.after(2000, lambda: self._docker_label.configure(text=prev))
+
     def _insert_streaming_placeholder(self, chat_state: _ChatState | None = None) -> str:
         if chat_state is None:
             chat_state = self._get_active_chat_state()
@@ -593,6 +628,9 @@ class ThetaCodeApp:
         if error_msg:
             text_widget.insert(mark, f"[Runtime error] {error_msg}\n", ("bubble_ai", "error_text"))
             text_widget.insert(mark, "\n", ("bubble_ai", "content"))
+            if chat_state.chat and chat_state.chat.missing_tool_call_ids():
+                text_widget.window_create(mark, window=self._make_missing_tool_button(chat_state))
+                text_widget.insert(mark, "\n", ("bubble_ai", "content"))
             if self.active_chat_id == chat_state.chat_id:
                 self._cost_label.configure(text="Cost: $0.0000")
         elif final_msg:

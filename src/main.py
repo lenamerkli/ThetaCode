@@ -281,6 +281,68 @@ class Chat:
                     entry['name'] = name
                 self._conversation.append(entry)
 
+    # ------------------------------------------------------------------
+    # Missing tool message repair
+    # ------------------------------------------------------------------
+    def missing_tool_call_ids(self) -> list[str]:
+        """Return every tool_call_id that lacks a matching role='tool' message.
+
+        OpenAI-compatible APIs reject a conversation where an assistant
+        message with ``tool_calls`` is not immediately followed by a tool
+        message for each ``tool_call_id``.  This reports the dangling IDs so
+        the UI can offer a one-click repair.
+        """
+        existing = {
+            msg.get('tool_call_id')
+            for msg in self._conversation
+            if msg.get('role') == 'tool' and msg.get('tool_call_id')
+        }
+        missing: list[str] = []
+        for msg in self._conversation:
+            if msg.get('role') != 'assistant':
+                continue
+            for tc in msg.get('tool_calls') or []:
+                call_id = tc.get('id', '')
+                if call_id and call_id not in existing:
+                    missing.append(call_id)
+        return missing
+
+    def add_missing_tool_messages(self) -> list[dict]:
+        """Insert an empty role='tool' message for every missing tool_call_id.
+
+        Each stub is placed immediately after the assistant message that
+        declared the tool call, preserving the ordering the API expects.
+        Returns the list of tool entries that were added (in conversation order).
+        """
+        existing = {
+            msg.get('tool_call_id')
+            for msg in self._conversation
+            if msg.get('role') == 'tool' and msg.get('tool_call_id')
+        }
+        added: list[dict] = []
+        new_conversation: T_CONVERSATION = []
+        for msg in self._conversation:
+            new_conversation.append(msg)
+            if msg.get('role') != 'assistant':
+                continue
+            for tc in msg.get('tool_calls') or []:
+                call_id = tc.get('id', '')
+                if not call_id or call_id in existing:
+                    continue
+                func = tc.get('function') or {}
+                entry: dict = {
+                    'role': 'tool',
+                    'content': '',
+                    'tool_call_id': call_id,
+                    'name': func.get('name', ''),
+                }
+                new_conversation.append(entry)
+                added.append(entry)
+                existing.add(call_id)
+        if added:
+            self._conversation = new_conversation
+        return added
+
     def _set_system_message(self, llm: LLM, use_official_tools: bool = False):
         """Set the system message based on project mode and tool calling format.
         
